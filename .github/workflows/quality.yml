@@ -1,0 +1,30 @@
+name: aisk quality
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 必须是全量历史：public verify 的 git-history-private-marker 靠
+          # `git rev-list --all` 逐提交扫描，浅克隆下只能看到一个提交，
+          # 门禁会静默通过（本地全历史能查到、CI 查不到）。改回默认 1 等于拆掉这道门禁。
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Public privacy gate
+        run: |
+          # 自守：fetch-depth 被改回默认值时，这里要报错而不是让门禁假装通过。
+          if [ -f .git/shallow ]; then
+            echo "::error::仓库是浅克隆（.git/shallow 存在），隐私门禁无法扫描历史，等于没有门禁"
+            exit 1
+          fi
+          ./bin/aisk public verify
+      - name: Unit tests
+        run: PYTHONPATH=agent-skills python -m unittest discover -s agent-skills/tests -p 'test_*.py'

@@ -1,0 +1,43 @@
+version: 2.0.0
+total_score: 100
+pass_threshold: 99.9
+scoring:
+  offline_contract: weighted_static_checks_only
+  real_file: manifest_and_external_lock_only
+  real_runtime: real_client_or_external_system_evidence_only
+  missing_runtime_evidence: report_offline_only_and_do_not_infer_pass
+zero_tolerance_rules:
+- 发现任何真实密钥或未脱敏内网IP进入公共仓
+- 存在未映射或能力丢失的旧技能
+- 并发状态机出现死锁、脏写或stale fencing token覆盖
+- 测试在脱机离线环境下发生未捕获异常或挂起超时
+- 回滚演练未达到干净基线状态
+- Token预算超限或通过删除安全/隐私/验证规则换取上下文缩减
+reports:
+- id: 1_skill_migration_report
+  weight: 18
+  description: 26个旧技能映射完整性、能力保留与逻辑路由别名验证
+- id: 2_overlay_validation_report
+  weight: 13
+  description: Overlay JSON Schema校验、受控插槽与非法属性阻断
+- id: 3_adapter_contract_report
+  weight: 9
+  description: 7大工具/角色能力矩阵与系统原生实名弹窗协议
+- id: 4_coordination_state_report
+  weight: 14
+  description: SQLite CAS事务、Outbox不可变事件、Fencing Token与超时接管
+- id: 5_offline_mcp_safety_report
+  weight: 9
+  description: 离线状态语义区分(live/cached/snapshot/unavailable)与SQL AST只读安全
+- id: 6_privacy_scan_report
+  weight: 15
+  description: 源码与Git历史全覆盖扫描，Allowlist导出验证
+- id: 7_sandbox_regression_report
+  weight: 7
+  description: 可复现的契约单元测试、弹窗归属回归和 JSON Schema 语法检查
+- id: 8_rollback_drill_report
+  weight: 5
+  description: 状态回滚与基线一致性演练
+- id: 9_token_efficiency_report
+  weight: 10
+  description: 常驻技能预算、任务上下文预算、重复指令比例与安全规则保留验证

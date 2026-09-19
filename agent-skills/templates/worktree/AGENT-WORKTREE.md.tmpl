@@ -1,0 +1,48 @@
+# 任务须知：{{name}}（{{title}}）
+
+> 由 aisk task 生成，优先级高于仓库 AGENTS.md 中与之冲突的内容。不要手改；变更请让操作者重新生成。
+
+## 开工先认领
+
+1. `{{cli}} claim {{task_id}} --tool <你的工具名>`：认领后才能改文件。被别人持有中会被拒绝——那就只读，不要动。
+   Claude 会话在本目录启动时由钩子自动认领；没认领就改文件时，守卫会替你认领或拦下。
+2. 读 `TASK.md`（目标与验收）、`PROGRESS.md`（上次做到哪）、`HANDOFF.md`（若已开始交接）。
+3. 做事过程中随手记：`{{cli}} note {{task_id}} --done "做了什么" --next "下一步"`。断网、被打断时，接手的人只能靠它。
+4. 要离开或暂停：`{{cli}} pause {{task_id}} --next "下一步"`（未提交改动快照备份、工作区原样保留、记进度、交还认领）。
+5. 超过 {{idle}} 分钟没有动静显示"空闲"，超过 {{claimable}} 分钟变成"可接手"，任何 AI 都可以认领续做。
+
+## 你在哪
+
+- 任务目录：`{{task_dir}}`——全部读写都在这里面（临时文件放系统临时目录）
+- **先把工具的工作目录切到这里**：编辑、补丁类工具如果还指向主工作区，补丁不会落到任务分支；守卫会拦住，但那一轮等于白做
+- 任务：`{{task_id}}` {{title}}
+- 基线：{{base_desc}}
+- 范围：{{scope}}
+
+| 仓库 | 目录 | 你的分支 | 路径 |
+|---|---|---|---|
+{{repos_table}}
+
+改动要落到上表**没有**的仓库时：`{{cli}} add-repo {{task_id}} <仓库别名>` 把它挂进来再改——不要改主工作区，也不要另开任务。
+
+- 端口（本任务独占）：前端 `{{web_port}}`，网关 `{{gw_port}}`，其他本地服务 `{{svc_ports}}`
+- 环境变量：`{{env_hint}}`
+
+## 交付
+
+1. 只提交到上表"你的分支"；小步提交；交接前每个仓库工作区都要干净。
+2. 提交说明一行，格式 {{message_hint}}，≤{{max_chars}} 字，不得出现 AI 工具或模型名称，不加 Co-authored-by。
+3. 需要最新代码：在仓库目录执行 `git rebase {{sync_ref}}`。冲突必须逐文件查看共同祖先、目标侧、任务侧的提交时间与业务意图后逐块合并；禁止 `-X ours/theirs`、`git checkout --ours/--theirs .` 或整文件覆盖。{{sync_hint}}
+4. 自检 `{{cli}} check {{task_id}}` → 填完 `HANDOFF.md` 每一节 → `{{cli}} ready {{task_id}}`。
+5. `{{cli}} land {{task_id}} --dry-run` 只生成候选；真实 `{{cli}} land {{task_id}}` 必须等待 `aisk task` 弹窗，由操作者明确点击“落地”后才会快进集成分支。各仓库各自落地，一个仓库被拦不影响其他仓库，`--repos` 只落指定仓库。{{land_hint}}
+
+## 禁止（守卫会拦截，漏网的会被审计发现）
+
+- 另开一个做同一件事的任务：先 `{{cli}} find <关键词>`，有就认领续做
+- `git push`、`git fetch`、`git pull`、`git stash`、`git worktree …`、`git config …`（只读查询除外）、`git update-ref`
+- checkout / 合并进 / 强制移动受保护分支：{{protected}}
+- `git merge/rebase/cherry-pick/checkout/reset main`、`origin/main`、`master`；主分支只由本人手工处理
+- `-X ours/theirs`、`git checkout/restore --ours/--theirs` 批量吞冲突
+- 进入或修改：主仓库 {{main_roots}}、锚点 `{{anchors}}`、`{{hub}}`、其他任务目录
+- 使用工具自带的"新建 worktree / 并行 worktree"功能（子任务请操作者 `aisk task new … --base {{task_id}}`）
+{{task_rules}}

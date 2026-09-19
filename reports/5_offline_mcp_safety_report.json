@@ -1,0 +1,41 @@
+{
+  "report_id": "5_offline_mcp_safety_report",
+  "report_type": "McpOfflineSafetyValidation",
+  "run_id": "be4fef98-18fc-4f8c-a60b-2f9b08af8804",
+  "git_commit": "53aa9dfeee41822c43e422eaacbf6b17a6e64bda",
+  "worktree_dirty": true,
+  "command": "python3 tools/verify_spec.py",
+  "started_at": "2026-09-19T12:38:14.324+00:00",
+  "finished_at": "2026-09-19T12:38:14.324+00:00",
+  "duration_ms": 0.048,
+  "offline_validated": true,
+  "passed": true,
+  "score": 100.0,
+  "checks": [
+    {
+      "check_id": "offline_mcp_response_semantics",
+      "command": "python3 tools/verify_spec.py",
+      "exit_code": 0,
+      "duration_ms": 0.044,
+      "stdout_digest": "",
+      "stderr_digest": "",
+      "passed": true,
+      "details": "快照事实可用；离线数据库结果伪造被拒绝"
+    },
+    {
+      "check_id": "mcp_spec_states",
+      "command": "python3 tools/verify_spec.py",
+      "exit_code": 0,
+      "duration_ms": 0.004,
+      "stdout_digest": "",
+      "stderr_digest": "",
+      "passed": true,
+      "details": "True"
+    }
+  ],
+  "input_digest": "5c4a47b201b3f4875fc062d66cb0d76d378c574c646d673afc2590c3aff46809",
+  "spec_digest": "73bd3978d02a6b6812c228a0f0eea5a145aaf67cd572d2afb126ca296d689305",
+  "content_digest": "4367b8eea88db9b7758c690ee1b3d539aea1fb3573c6eab2b7174bc203710417",
+  "validation_scope": "offline_contract",
+  "real_file_checked": false
+}

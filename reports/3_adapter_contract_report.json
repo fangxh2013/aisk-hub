@@ -1,0 +1,41 @@
+{
+  "report_id": "3_adapter_contract_report",
+  "report_type": "AdapterContractValidation",
+  "run_id": "bea30743-ca0e-4be3-b33e-5e2b882fea20",
+  "git_commit": "53aa9dfeee41822c43e422eaacbf6b17a6e64bda",
+  "worktree_dirty": true,
+  "command": "python3 tools/verify_spec.py",
+  "started_at": "2026-09-19T12:38:14.162+00:00",
+  "finished_at": "2026-09-19T12:38:14.162+00:00",
+  "duration_ms": 4.283,
+  "offline_validated": true,
+  "passed": true,
+  "score": 100.0,
+  "checks": [
+    {
+      "check_id": "adapter_capabilities_and_dialog",
+      "command": "python3 tools/verify_spec.py",
+      "exit_code": 0,
+      "duration_ms": 0.761,
+      "stdout_digest": "",
+      "stderr_digest": "",
+      "passed": true,
+      "details": "7 个 actor；四工具安装目标、会话、标题和降级策略通过"
+    },
+    {
+      "check_id": "adapter_registry_parity",
+      "command": "python3 tools/verify_spec.py",
+      "exit_code": 0,
+      "duration_ms": 3.522,
+      "stdout_digest": "",
+      "stderr_digest": "",
+      "passed": true,
+      "details": "spec / actor / action_context / permissions 四方工具表一致，WorkBuddy 两端结论对齐"
+    }
+  ],
+  "input_digest": "5c4a47b201b3f4875fc062d66cb0d76d378c574c646d673afc2590c3aff46809",
+  "spec_digest": "73bd3978d02a6b6812c228a0f0eea5a145aaf67cd572d2afb126ca296d689305",
+  "content_digest": "68f093ae47289c28be9ce1051406bbe31315d42ec1372aa7a35a777bf1398803",
+  "validation_scope": "offline_contract",
+  "real_file_checked": false
+}

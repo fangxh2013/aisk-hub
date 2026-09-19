@@ -1,0 +1,298 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AiskEventPayloads",
+  "type": "object",
+  "definitions": {
+    "TaskCreatedPayload": {
+      "type": "object",
+      "required": [
+        "title",
+        "repo_alias",
+        "target_branch"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "repo_alias": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+        },
+        "target_branch": {
+          "type": "string"
+        },
+        "issue_ref": {
+          "type": "string"
+        }
+      }
+    },
+    "TaskClaimedPayload": {
+      "type": "object",
+      "required": [
+        "fencing_token",
+        "lease_ttl_seconds",
+        "worktree_path"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fencing_token": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lease_ttl_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 7200
+        },
+        "worktree_path": {
+          "type": "string"
+        },
+        "previous_actor": {
+          "type": "string"
+        }
+      }
+    },
+    "TaskHeartbeatPayload": {
+      "type": "object",
+      "required": [
+        "fencing_token"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fencing_token": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "client_timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "TaskNotedPayload": {
+      "type": "object",
+      "required": ["fencing_token", "note"],
+      "additionalProperties": false,
+      "properties": {
+        "fencing_token": {"type": "integer", "minimum": 1},
+        "note": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "next_step": {"type": "string", "maxLength": 1000}
+      }
+    },
+    "TaskPausedPayload": {
+      "type": "object",
+      "required": [
+        "fencing_token",
+        "pause_reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fencing_token": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pause_reason": {
+          "type": "string"
+        }
+      }
+    },
+    "TaskReleasedPayload": {
+      "type": "object",
+      "required": [
+        "fencing_token",
+        "release_reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fencing_token": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "release_reason": {
+          "type": "string"
+        }
+      }
+    },
+    "TaskAbortedPayload": {
+      "type": "object",
+      "required": [
+        "fencing_token",
+        "abort_reason",
+        "rollback_verified"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fencing_token": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "abort_reason": {
+          "type": "string"
+        },
+        "rollback_verified": {
+          "type": "boolean"
+        }
+      }
+    },
+    "TaskCheckedPayload": {
+      "type": "object",
+      "required": [
+        "fencing_token",
+        "gate_results",
+        "passed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fencing_token": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "gate_results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "gate_name",
+              "passed"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "gate_name": {
+                "type": "string"
+              },
+              "passed": {
+                "type": "boolean"
+              },
+              "details": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "passed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "TaskReadyPayload": {
+      "type": "object",
+      "required": [
+        "fencing_token",
+        "commit_sha",
+        "diff_summary"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fencing_token": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{7,40}$"
+        },
+        "diff_summary": {
+          "type": "string"
+        }
+      }
+    },
+    "TaskLandedPayload": {
+      "type": "object",
+      "required": [
+        "fencing_token",
+        "target_branch",
+        "land_commit_sha",
+        "dialog_confirmed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fencing_token": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "target_branch": {
+          "type": "string"
+        },
+        "land_commit_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{7,40}$"
+        },
+        "dialog_confirmed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "TaskPromotedPayload": {
+      "type": "object",
+      "required": [
+        "fencing_token",
+        "trunk_branch",
+        "promote_sha"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fencing_token": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "trunk_branch": {
+          "type": "string"
+        },
+        "promote_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{7,40}$"
+        }
+      }
+    },
+    "TaskConflictedPayload": {
+      "type": "object",
+      "required": [
+        "fencing_token",
+        "conflict_type",
+        "details"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fencing_token": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "conflict_type": {
+          "type": "string",
+          "enum": [
+            "git_merge_conflict",
+            "concurrency_version_mismatch",
+            "stale_fencing_token"
+          ]
+        },
+        "details": {
+          "type": "string"
+        }
+      }
+    },
+    "TaskExpiredPayload": {
+      "type": "object",
+      "required": [
+        "expired_actor",
+        "last_heartbeat_at",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "expired_actor": {
+          "type": "string"
+        },
+        "last_heartbeat_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

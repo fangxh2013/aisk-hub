@@ -1,0 +1,11 @@
+# 技能脚本用的第三方库 —— 不是内核依赖，内核零依赖。
+# 装法: python3 -m venv "$AISK_HOME/venv" && "$AISK_HOME/venv/bin/python" -m pip install -r requirements-tools.txt
+# 详见 ENVIRONMENT.md
+PyMySQL==1.2.0
+PyYAML==6.0.3
+minio==7.2.20
+mysql-connector-python==26.7.0
+paramiko==5.0.0
+pycryptodome==3.23.0
+redis==8.1.0
+requests==2.34.2

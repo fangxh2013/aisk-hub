@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AiskMcpResponse",
+  "type": "object",
+  "required": [
+    "ok",
+    "source",
+    "data_availability",
+    "as_of",
+    "is_live",
+    "redacted",
+    "data"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "ok": {
+      "type": "boolean"
+    },
+    "source": {
+      "type": "string"
+    },
+    "data_availability": {
+      "type": "string",
+      "enum": [
+        "live",
+        "offline_cached",
+        "offline_snapshot",
+        "offline_unavailable"
+      ]
+    },
+    "as_of": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "is_live": {
+      "type": "boolean"
+    },
+    "redacted": {
+      "type": "boolean"
+    },
+    "profile": {
+      "type": "string"
+    },
+    "environment": {
+      "type": "string"
+    },
+    "error_code": {
+      "type": "string"
+    },
+    "error_message": {
+      "type": "string"
+    },
+    "data": {
+      "type": [
+        "object",
+        "array",
+        "null"
+      ]
+    }
+  }
+}

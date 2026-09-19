@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AiskCoordinationEvent",
+  "type": "object",
+  "required": [
+    "event_id",
+    "event_type",
+    "task_id",
+    "version",
+    "actor",
+    "idempotency_key",
+    "occurred_at",
+    "payload"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9-]{36}$"
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "task.created",
+        "task.claimed",
+        "task.heartbeat",
+        "task.noted",
+        "task.paused",
+        "task.checked",
+        "task.ready",
+        "task.landed",
+        "task.promoted",
+        "task.released",
+        "task.aborted",
+        "task.conflicted",
+        "task.expired"
+      ]
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^T[0-9]{3,}$"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128
+    },
+    "actor": {
+      "type": "object",
+      "required": [
+        "tool",
+        "session_id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "tool": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "claude",
+            "antigravity",
+            "workbuddy",
+            "workbuddy-ai",
+            "cursor",
+            "human"
+          ]
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string"
+        }
+      }
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"event_type": {"const": "task.created"}}}, "then": {"properties": {"payload": {"$ref": "event-payloads.schema.json#/definitions/TaskCreatedPayload"}}}},
+    {"if": {"properties": {"event_type": {"const": "task.claimed"}}}, "then": {"properties": {"payload": {"$ref": "event-payloads.schema.json#/definitions/TaskClaimedPayload"}}}},
+    {"if": {"properties": {"event_type": {"const": "task.heartbeat"}}}, "then": {"properties": {"payload": {"$ref": "event-payloads.schema.json#/definitions/TaskHeartbeatPayload"}}}},
+    {"if": {"properties": {"event_type": {"const": "task.noted"}}}, "then": {"properties": {"payload": {"$ref": "event-payloads.schema.json#/definitions/TaskNotedPayload"}}}},
+    {"if": {"properties": {"event_type": {"const": "task.checked"}}}, "then": {"properties": {"payload": {"$ref": "event-payloads.schema.json#/definitions/TaskCheckedPayload"}}}},
+    {"if": {"properties": {"event_type": {"const": "task.ready"}}}, "then": {"properties": {"payload": {"$ref": "event-payloads.schema.json#/definitions/TaskReadyPayload"}}}},
+    {"if": {"properties": {"event_type": {"const": "task.landed"}}}, "then": {"properties": {"payload": {"$ref": "event-payloads.schema.json#/definitions/TaskLandedPayload"}}}},
+    {"if": {"properties": {"event_type": {"const": "task.promoted"}}}, "then": {"properties": {"payload": {"$ref": "event-payloads.schema.json#/definitions/TaskPromotedPayload"}}}},
+    {"if": {"properties": {"event_type": {"const": "task.conflicted"}}}, "then": {"properties": {"payload": {"$ref": "event-payloads.schema.json#/definitions/TaskConflictedPayload"}}}},
+    {"if": {"properties": {"event_type": {"const": "task.expired"}}}, "then": {"properties": {"payload": {"$ref": "event-payloads.schema.json#/definitions/TaskExpiredPayload"}}}},
+    {"if": {"properties": {"event_type": {"const": "task.paused"}}}, "then": {"properties": {"payload": {"$ref": "event-payloads.schema.json#/definitions/TaskPausedPayload"}}}},
+    {"if": {"properties": {"event_type": {"const": "task.released"}}}, "then": {"properties": {"payload": {"$ref": "event-payloads.schema.json#/definitions/TaskReleasedPayload"}}}},
+    {"if": {"properties": {"event_type": {"const": "task.aborted"}}}, "then": {"properties": {"payload": {"$ref": "event-payloads.schema.json#/definitions/TaskAbortedPayload"}}}}
+  ]
+}

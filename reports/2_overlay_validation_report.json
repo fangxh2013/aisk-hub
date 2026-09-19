@@ -1,0 +1,41 @@
+{
+  "report_id": "2_overlay_validation_report",
+  "report_type": "OverlaySchemaValidation",
+  "run_id": "48741aba-5138-4e2f-ba84-1ce5de60ad4c",
+  "git_commit": "53aa9dfeee41822c43e422eaacbf6b17a6e64bda",
+  "worktree_dirty": true,
+  "command": "python3 tools/verify_spec.py",
+  "started_at": "2026-09-19T12:38:14.081+00:00",
+  "finished_at": "2026-09-19T12:38:14.081+00:00",
+  "duration_ms": 2.213,
+  "offline_validated": true,
+  "passed": true,
+  "score": 100.0,
+  "checks": [
+    {
+      "check_id": "overlay_schema_and_injection_guard",
+      "command": "python3 tools/verify_spec.py",
+      "exit_code": 0,
+      "duration_ms": 0.239,
+      "stdout_digest": "",
+      "stderr_digest": "",
+      "passed": true,
+      "details": "兼容 Overlay 通过；未知插槽、可执行注入和错误 lock 被拒绝"
+    },
+    {
+      "check_id": "placeholder_not_real_manifest",
+      "command": "python3 tools/verify_spec.py",
+      "exit_code": 0,
+      "duration_ms": 1.974,
+      "stdout_digest": "",
+      "stderr_digest": "",
+      "passed": true,
+      "details": "placeholder 仅可用于合成样例，真实 Overlay 检查会拒绝"
+    }
+  ],
+  "input_digest": "5c4a47b201b3f4875fc062d66cb0d76d378c574c646d673afc2590c3aff46809",
+  "spec_digest": "73bd3978d02a6b6812c228a0f0eea5a145aaf67cd572d2afb126ca296d689305",
+  "content_digest": "f455784a59244f6831cf472bfe39ffd167cd74bd9fcb8ec6aac84d55a6599c6b",
+  "validation_scope": "offline_contract",
+  "real_file_checked": false
+}

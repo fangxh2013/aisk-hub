@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AiskOverlayManifest",
+  "type": "object",
+  "required": [
+    "version",
+    "type",
+    "public_kernel",
+    "skill_slots"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "enum": [
+        2
+      ]
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "aisk-private-overlay"
+      ]
+    },
+    "manifest_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+    },
+    "public_kernel": {
+      "type": "object",
+      "required": [
+        "repository",
+        "required_version",
+        "content_digest"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "required_version": {
+          "type": "string",
+          "pattern": "^>=[0-9]+\\.[0-9]+\\.[0-9]+"
+        },
+        "content_digest": {
+          "type": "string",
+          "pattern": "^(?:[a-f0-9]{64}|<placeholder>)$"
+        }
+      }
+    },
+    "profiles": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^profiles/[a-zA-Z0-9_-]+\\.yaml$"
+      }
+    },
+    "project_rules": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^rules/[a-zA-Z0-9_-]+\\.md$"
+      }
+    },
+    "custom_skills": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^skills/[a-zA-Z0-9_-]+$"
+      }
+    },
+    "skill_slots": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend-engineering": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "package_prefix": {
+              "type": "string"
+            },
+            "module_prefix": {
+              "type": "string"
+            },
+            "common_module": {
+              "type": "string"
+            },
+            "api_module": {
+              "type": "string"
+            }
+          }
+        },
+        "web-engineering": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "menu_icon_prefix": {
+              "type": "string"
+            },
+            "permission_directive": {
+              "type": "string"
+            },
+            "api_base_url_env": {
+              "type": "string"
+            }
+          }
+        },
+        "ops-workbench": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "k8s_cluster_type": {
+              "type": "string",
+              "enum": [
+                "k3s",
+                "k8s",
+                "microk8s"
+              ]
+            },
+            "nacos_nodeport": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "report_id": "9_token_efficiency_report",
+  "report_type": "TokenEfficiencyValidation",
+  "run_id": "fddef899-5c86-49b3-94e5-72b604444d8e",
+  "git_commit": "53aa9dfeee41822c43e422eaacbf6b17a6e64bda",
+  "worktree_dirty": true,
+  "command": "python3 tools/verify_spec.py",
+  "started_at": "2026-09-19T12:38:14.575+00:00",
+  "finished_at": "2026-09-19T12:38:14.575+00:00",
+  "duration_ms": 1.539,
+  "offline_validated": true,
+  "passed": true,
+  "score": 100.0,
+  "checks": [
+    {
+      "check_id": "token_context_budget_and_dedup",
+      "command": "python3 tools/verify_spec.py",
+      "exit_code": 0,
+      "duration_ms": 1.539,
+      "stdout_digest": "",
+      "stderr_digest": "",
+      "passed": true,
+      "details": "常驻技能、单技能任务上下文和重复指令比例均在预算内；安全/隐私/验证规则保留声明存在"
+    }
+  ],
+  "input_digest": "5c4a47b201b3f4875fc062d66cb0d76d378c574c646d673afc2590c3aff46809",
+  "spec_digest": "73bd3978d02a6b6812c228a0f0eea5a145aaf67cd572d2afb126ca296d689305",
+  "content_digest": "54c959dcbd3d2eb895675b478c6a3e6bc79edf12e3490b27b6451a800ced81d4",
+  "validation_scope": "offline_contract",
+  "real_file_checked": false
+}

@@ -1,0 +1,224 @@
+version: 2.1.0
+description: 四工具适配契约；能力声明不等同于真实客户端联调通过
+contract:
+  supported_tools:
+  - codex
+  - claude
+  - antigravity
+  - workbuddy
+  required_fields:
+  - install_target
+  - session_sources
+  - dialog
+  - degradation
+  verification_rule: offline_contract_must_not_be_reported_as_client_verified
+actors:
+  codex:
+    runtime_type: cli_and_agent
+    install_target:
+      project_hooks: .codex/hooks.json
+      host_mcp: not_required
+    session_sources:
+    - CODEX_THREAD_ID
+    - CODEX_SESSION_ID
+    - explicit_session_argument
+    hook_events:
+    - SessionStart
+    - PreToolUse
+    - Stop
+    - SessionEnd
+    capabilities:
+      cli_execution: true
+      native_dialog: true
+      hooks_intercept: true
+      mcp_client: false
+      structured_session: true
+    trust_level: standard
+    verification: offline_contract
+    dialog:
+      title_format: '{action}-{tool}｜{task_id}'
+      fallback_title_format: '{action}-codex｜{task_id}'
+      confirmation: fail_closed
+    degradation:
+      missing_hooks: explicit_command_with_session
+      missing_dialog: tty_prompt_read
+      missing_mcp: cli_or_local_snapshot
+  claude:
+    runtime_type: agent_environment
+    install_target:
+      project_hooks: .claude/settings.json
+      host_mcp: optional_user_config
+    session_sources:
+    - CLAUDE_CODE_SESSION_ID
+    - explicit_session_argument
+    hook_events:
+    - SessionStart
+    - PreToolUse
+    - Stop
+    - SessionEnd
+    capabilities:
+      cli_execution: true
+      native_dialog: false
+      hooks_intercept: true
+      mcp_client: true
+      structured_session: true
+    trust_level: standard
+    verification: offline_contract
+    dialog:
+      title_format: '{action}-{tool}｜{task_id}'
+      fallback_title_format: '{action}-claude｜{task_id}'
+      confirmation: fail_closed
+    degradation:
+      missing_hooks: explicit_command_with_session
+      missing_dialog: tty_prompt_read
+      missing_mcp: cli_or_local_snapshot
+  antigravity:
+    runtime_type: ide_agent
+    install_target:
+      project_hooks: .agents/hooks.json
+      host_mcp: host_managed_mcp_config
+    session_sources:
+    - conversationId
+    - explicit_session_argument
+    hook_events:
+    - SessionStart
+    - PreToolUse
+    - Stop
+    - SessionEnd
+    capabilities:
+      cli_execution: true
+      native_dialog: true
+      hooks_intercept: true
+      mcp_client: true
+      structured_session: true
+    trust_level: standard
+    verification: offline_contract
+    dialog:
+      title_format: '{action}-{tool}｜{task_id}'
+      fallback_title_format: '{action}-antigravity｜{task_id}'
+      confirmation: fail_closed
+    degradation:
+      missing_hooks: explicit_command_with_session
+      missing_dialog: tty_prompt_read
+      missing_mcp: local_snapshot_only
+  workbuddy:
+    runtime_type: desktop_agent
+    install_target:
+      project_hooks: .codebuddy/settings.json
+      host_mcp: host_managed_mcp_config
+      ai_variant: shared_project_hooks_runtime_detected
+    session_sources:
+    - CODEBUDDY_SESSION_ID
+    - WORKBUDDY_CONFIG_DIR
+    - explicit_session_argument
+    hook_events:
+    - SessionStart
+    - PreToolUse
+    - Stop
+    - SessionEnd
+    capabilities:
+      cli_execution: true
+      native_dialog: true
+      hooks_intercept: true
+      mcp_client: true
+      structured_session: true
+    trust_level: standard
+    verification: offline_contract
+    dialog:
+      title_format: '{action}-{tool}｜{task_id}'
+      fallback_title_format: '{action}-workbuddy｜{task_id}'
+      confirmation: fail_closed
+    degradation:
+      missing_hooks: explicit_command_with_session
+      missing_dialog: tty_prompt_read
+      missing_mcp: cli_or_local_snapshot
+  workbuddy-ai:
+    runtime_type: desktop_agent_sub
+    install_target:
+      project_hooks: .codebuddy/settings.json
+      host_mcp: host_managed_mcp_config
+      ai_variant: runtime_detected_from_WORKBUDDY_CONFIG_DIR
+    session_sources:
+    - CODEBUDDY_SESSION_ID
+    - WORKBUDDY_CONFIG_DIR
+    - explicit_session_argument
+    hook_events:
+    - SessionStart
+    - PreToolUse
+    - Stop
+    - SessionEnd
+    capabilities:
+      cli_execution: true
+      native_dialog: true
+      hooks_intercept: true
+      mcp_client: true
+      structured_session: true
+    trust_level: standard
+    verification: offline_contract
+    dialog:
+      title_format: '{action}-{tool}｜{task_id}'
+      fallback_title_format: '{action}-workbuddy-ai｜{task_id}'
+      confirmation: fail_closed
+    degradation:
+      missing_hooks: explicit_command_with_session
+      missing_dialog: tty_prompt_read
+      missing_mcp: cli_or_local_snapshot
+  cursor:
+    runtime_type: editor_agent
+    install_target:
+      project_hooks: unsupported
+      host_mcp: optional_user_config
+    session_sources:
+    - explicit_session_argument
+    hook_events:
+    - none
+    capabilities:
+      cli_execution: true
+      native_dialog: false
+      hooks_intercept: false
+      mcp_client: true
+      structured_session: false
+    trust_level: restricted
+    verification: compatibility_only
+    dialog:
+      title_format: '{action}-{tool}｜{task_id}'
+      fallback_title_format: '{action}-cursor｜{task_id}'
+      confirmation: fail_closed
+    degradation:
+      missing_hooks: explicit_command_with_session
+      missing_dialog: tty_prompt_read
+      missing_mcp: local_snapshot_only
+  human:
+    runtime_type: operator
+    install_target:
+      project_hooks: not_applicable
+      host_mcp: not_applicable
+    session_sources:
+    - explicit_session_argument
+    hook_events:
+    - none
+    capabilities:
+      cli_execution: true
+      native_dialog: true
+      hooks_intercept: false
+      mcp_client: false
+      structured_session: true
+    trust_level: admin
+    verification: compatibility_only
+    dialog:
+      title_format: '{action}-{tool}｜{task_id}'
+      fallback_title_format: '{action}-human｜{task_id}'
+      confirmation: fail_closed
+    degradation:
+      missing_hooks: explicit_command_with_session
+      missing_dialog: tty_prompt_read
+      missing_mcp: local_snapshot_only
+dialog_protocol:
+  title_format: '{action}-{tool}｜{task_id}'
+  fallback_no_model: '{action}-{tool}｜{task_id}'
+  required_fields:
+  - action
+  - tool
+  - task_id
+  headless_fallback: tty_prompt_read
+  ci_automated_behavior: fail_closed

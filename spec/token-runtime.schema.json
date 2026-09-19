@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AiskTokenRuntimePlan",
+  "type": "object",
+  "required": ["mode", "triggers", "protected_sources", "budget", "fallback_reason"],
+  "additionalProperties": false,
+  "properties": {
+    "mode": {"type": "string", "enum": ["lite", "standard", "deep", "emergency"]},
+    "triggers": {"type": "array", "items": {"type": "object", "required": ["rule", "severity", "matches", "reason"], "additionalProperties": false, "properties": {"rule": {"type": "string", "minLength": 1}, "severity": {"type": "string", "enum": ["hard", "fail-to-full"]}, "matches": {"type": "array", "items": {"type": "string"}}, "reason": {"type": "string"}}}},
+    "protected_sources": {"type": "array", "items": {"type": "string"}},
+    "budget": {"type": "object", "required": ["requested", "limit", "effective", "allocated", "protected_tokens", "hard_constraints_preserved", "included_sources", "dropped_sources"], "additionalProperties": false, "properties": {"requested": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 0}, "effective": {"type": "integer", "minimum": 0}, "allocated": {"type": "integer", "minimum": 0}, "protected_tokens": {"type": "integer", "minimum": 0}, "hard_constraints_preserved": {"type": "boolean"}, "included_sources": {"type": "array", "items": {"$ref": "#/$defs/source"}}, "dropped_sources": {"type": "array", "items": {"$ref": "#/$defs/source"}}}},
+    "fallback_reason": {"type": ["string", "null"]}
+  },
+  "$defs": {"source": {"type": "object", "required": ["source", "tokens", "protected", "required", "priority", "included"], "additionalProperties": false, "properties": {"source": {"type": "string", "minLength": 1}, "tokens": {"type": "integer", "minimum": 0}, "protected": {"type": "boolean"}, "required": {"type": "boolean"}, "priority": {"type": "integer"}, "included": {"type": "boolean"}}}}
+}

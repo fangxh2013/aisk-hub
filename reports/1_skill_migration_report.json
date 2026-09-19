@@ -1,0 +1,31 @@
+{
+  "report_id": "1_skill_migration_report",
+  "report_type": "SkillMigrationValidation",
+  "run_id": "d8d28a96-85bf-446d-a716-98aa9a1d4c56",
+  "git_commit": "53aa9dfeee41822c43e422eaacbf6b17a6e64bda",
+  "worktree_dirty": false,
+  "command": "python3 tools/verify_spec.py",
+  "started_at": "2026-09-19T12:38:13.991+00:00",
+  "finished_at": "2026-09-19T12:38:13.991+00:00",
+  "duration_ms": 20.357,
+  "offline_validated": true,
+  "passed": true,
+  "score": 100.0,
+  "checks": [
+    {
+      "check_id": "legacy_skill_coverage_and_alias",
+      "command": "python3 tools/verify_spec.py",
+      "exit_code": 0,
+      "duration_ms": 20.357,
+      "stdout_digest": "",
+      "stderr_digest": "",
+      "passed": true,
+      "details": "9 个 canonical、26 个 legacy alias、兼容别名解析通过"
+    }
+  ],
+  "input_digest": "5c4a47b201b3f4875fc062d66cb0d76d378c574c646d673afc2590c3aff46809",
+  "spec_digest": "73bd3978d02a6b6812c228a0f0eea5a145aaf67cd572d2afb126ca296d689305",
+  "content_digest": "e5568b42b605b880586741e27729077af1029a1698952bfbe4b76c9a2348f6b9",
+  "validation_scope": "offline_contract",
+  "real_file_checked": false
+}

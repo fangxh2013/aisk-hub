@@ -1,0 +1,34 @@
+# 项目档案模板 —— 接一个新项目，复制这个文件到 ~/.aisk/profiles/<项目名>.yaml 改一改就行。
+#
+# 三条规则：
+#   1. 只放拓扑与指针，不放口令（口令走凭据后端，见设计文档 §7）
+#   2. 不抄服务清单（服务事实由 aisk 从部署仓现场解析，避免第三份会漂移的副本）
+#   3. 各环境布局不一致很正常，路径逐个环境显式声明，内核不做目录约定假设
+
+project: 项目名
+
+repos:
+  # 键名随意，值是仓库路径。aisk 靠这些路径反查「我现在在哪个项目」，
+  # 所以每个你会在里面敲命令的仓库都应该列出来。支持 ~ 和环境变量。
+  main: ~/work/你的仓库
+  # frontend: ~/work/你的前端仓库
+  # deploy:   ~/work/你的部署仓库     # 声明了才能用 aisk fact service
+
+envs:
+  dev:
+    hosts: {app: "<app-ip-placeholder>"}
+    k8s: {ns: 你的命名空间, access: ssh}
+
+    # 以下三项都相对 repos.deploy；没有部署仓就整个省略，aisk 会优雅跳过
+    # manifests:     dev/k8s-manifests/business/services
+    # jenkins_jobs:  dev/jenkins-jobs
+    # nacos_configs: dev/nacos-configs
+
+    build: {via: jenkins, manual_build: forbidden}
+    policy: readonly
+
+  # 生产环境建议加 require_confirm，aisk 也不会对多环境做默认推断，
+  # 必须显式 --env prod 才能命中
+  # prod:
+  #   policy: readonly-strict
+  #   require_confirm: true
