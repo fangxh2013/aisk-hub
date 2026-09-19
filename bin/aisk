@@ -1,0 +1,64 @@
+#!/bin/sh
+# aisk-hub 的唯一入口：运行时只解析本目录内核，旧目录与外部仓库不在运行链路中。
+set -eu
+
+SOURCE=$0
+while [ -h "$SOURCE" ]; do
+  DIR=$(cd -P "$(dirname "$SOURCE")" && pwd)
+  SOURCE=$(readlink "$SOURCE")
+  case "$SOURCE" in
+    /*) ;;
+    *) SOURCE="$DIR/$SOURCE" ;;
+  esac
+done
+ROOT=$(cd -P "$(dirname "$SOURCE")/.." && pwd)
+ENGINE="$ROOT/agent-skills"
+# 运行态（任务数据、generated 的 lane.gitconfig、备份）必须留在仓库之外：
+# 放在 $ROOT/runtime 时，git clean -fdx 会把任务数据和 git 封锁配置一起删掉，
+# 且 task doctor 会持续告警「数据根在 git 仓库之内」。默认落到 ~/.aisk-runtime/hub，
+# 与业务任务数据根 ~/.aisk-runtime/projects/<项目>/<平台> 同一体系。
+# 需要临时改回仓库内时用 AISKHUB_RUNTIME_ROOT 覆盖即可。
+RUNTIME_ROOT=${AISKHUB_RUNTIME_ROOT:-"$HOME/.aisk-runtime/hub"}
+if [ -n "${AISKHUB_PRIVATE_ROOT:-}" ]; then
+  PRIVATE_ROOT="$AISKHUB_PRIVATE_ROOT"
+elif [ -d "$ROOT/../aisk-private" ]; then
+  PRIVATE_ROOT="$ROOT/../aisk-private"
+else
+  PRIVATE_ROOT="$ROOT/private"
+fi
+if [ -n "${AISKHUB_PROFILE_DIR:-}" ]; then
+  PROFILE_ROOT="$AISKHUB_PROFILE_DIR"
+elif [ -d "$PRIVATE_ROOT/profiles" ]; then
+  PROFILE_ROOT="$PRIVATE_ROOT/profiles"
+else
+  PROFILE_ROOT="$RUNTIME_ROOT/profiles"
+fi
+
+case "$ROOT $*" in
+  *agent-skills-worktrees*)
+    echo "拒绝：aisk-hub 运行参数或根目录包含已废弃路径 agent-skills-worktrees" >&2
+    exit 78
+    ;;
+esac
+
+if [ ! -f "$ENGINE/bin/aisk" ]; then
+  echo "错误：内核不存在：$ENGINE/bin/aisk" >&2
+  exit 2
+fi
+
+export AISK_HUB_ROOT="$ROOT"
+export AISK_ENGINE_ROOT="$ENGINE"
+# AISK_HOME 是「用户的 aisk 家目录」（~/.aisk）：venv、cache、secrets.sops.yaml、
+# launch.yaml、kernel-root 指针、bind 的 generated/ 与 backups 都在它下面，
+# 引擎里有 10 处按 `AISK_HOME or ~/.aisk` 解析。它**不是**任务运行根。
+# 272afd0 曾把它写成 "$RUNTIME_ROOT"，导致那 10 处全部解析到不存在的路径
+# （secrets/launch.yaml/cache/kernel-root/venv 一起失效）；这里恢复 960c406 的形态。
+# 任务运行根仍由 AISKHUB_RUNTIME_ROOT（与档案的 data_root）承担，两者互不干扰。
+export AISK_HOME="${AISK_HOME:-$HOME/.aisk}"
+export AISKHUB_RUNTIME_ROOT="$RUNTIME_ROOT"
+export AISK_PRIVATE_ROOT="$PRIVATE_ROOT"
+export AISK_PROFILE_DIR="$PROFILE_ROOT"
+export AISK_LAUNCHER="$ROOT/bin/aisk"
+unset PYTHONPATH
+
+exec python3 "$ENGINE/bin/aisk" "$@"

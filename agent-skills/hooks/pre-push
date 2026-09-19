@@ -1,0 +1,51 @@
+#!/bin/sh
+# 保护 main：只允许人工推送。
+#
+# 由 agent-skills 安装（aisk guard-main install）。
+#
+# **为什么需要它**：2026-08-27 实测，有 AI 会话自行完成 dev→main 合并并推送成功。
+# 而 git-flow 技能里当时写着「dev 与 main 服务端保护，任何人不能直接 push」——
+# 那句话是假的，服务端并没有保护。**声称存在却不存在的管控，比没有管控更危险**：
+# 读到它的人和 AI 都会以为有兜底，于是放心去推。
+#
+# **自守卫**：只在同时存在 origin/dev 与 origin/main 的仓库里生效。
+# 以 main 为工作分支、没有 dev 的仓库不受影响。
+#
+# 人工放行：HBXH_ALLOW_MAIN_PUSH=1 git push origin main
+# 这个变量刻意不写进任何 AI 的技能正文；它的每次使用都会打印到终端。
+
+remote_has() { git show-ref --verify --quiet "refs/remotes/origin/$1"; }
+
+# 没有 dev/main 双分支的仓库，本约束不适用
+remote_has dev && remote_has main || exit 0
+
+blocked=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    case "$remote_ref" in
+        refs/heads/main|refs/heads/master) blocked=1 ;;
+    esac
+done
+
+[ "$blocked" -eq 1 ] || exit 0
+
+if [ "$HBXH_ALLOW_MAIN_PUSH" = "1" ]; then
+    printf '\033[33m⚠️  正在人工放行推送到 main（HBXH_ALLOW_MAIN_PUSH=1）\033[0m\n' >&2
+    printf '   仓库: %s\n' "$(git rev-parse --show-toplevel)" >&2
+    printf '   时间: %s\n' "$(date '+%F %T')" >&2
+    exit 0
+fi
+
+cat >&2 <<'MSG'
+
+⛔ 拒绝推送到 main。
+
+main 只能由本人手工合并。这条约束是本地强制的，不依赖服务端。
+
+要合入 main，请走 PR；确需本地直推时，由人明确放行：
+
+    HBXH_ALLOW_MAIN_PUSH=1 git push origin main
+
+（AI 会话不应使用上面这条命令。若你是 AI，请把这个决定交回给人。）
+
+MSG
+exit 1

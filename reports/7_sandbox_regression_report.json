@@ -1,0 +1,61 @@
+{
+  "report_id": "7_sandbox_regression_report",
+  "report_type": "SandboxContractRegression",
+  "run_id": "bab658fd-742a-44a9-a6ed-fe24cf50311a",
+  "git_commit": "53aa9dfeee41822c43e422eaacbf6b17a6e64bda",
+  "worktree_dirty": true,
+  "command": "python3 tools/verify_spec.py",
+  "started_at": "2026-09-19T12:38:14.494+00:00",
+  "finished_at": "2026-09-19T12:38:14.494+00:00",
+  "duration_ms": 388.504,
+  "offline_validated": true,
+  "passed": true,
+  "score": 100.0,
+  "checks": [
+    {
+      "check_id": "spec_json_syntax",
+      "command": "python3 tools/verify_spec.py",
+      "exit_code": 0,
+      "duration_ms": 1.725,
+      "stdout_digest": "",
+      "stderr_digest": "",
+      "passed": true,
+      "details": "所有 JSON Schema 可解析"
+    },
+    {
+      "check_id": "contract_unit_tests",
+      "command": "python3 -m unittest discover -s agent-skills/tests -p test_contracts.py",
+      "exit_code": 0,
+      "duration_ms": 112.542,
+      "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_digest": "fc827540616121b1a004e635148c02faab8889a9b4ce20cf29a8788294430ef9",
+      "passed": true,
+      "details": ".......\n----------------------------------------------------------------------\nRan 7 tests in 0.030s\n\nOK"
+    },
+    {
+      "check_id": "action_context_regression",
+      "command": "python3 -m unittest discover -s agent-skills/tests -p test_action_context.py",
+      "exit_code": 0,
+      "duration_ms": 124.938,
+      "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_digest": "670a39115e7523a8984e4842e16547cb2094b03fad392b037b4b9dc8b2656e62",
+      "passed": true,
+      "details": ".......\n----------------------------------------------------------------------\nRan 7 tests in 0.003s\n\nOK"
+    },
+    {
+      "check_id": "token_efficiency_regression",
+      "command": "python3 -m unittest discover -s agent-skills/tests -p test_token_efficiency.py",
+      "exit_code": 0,
+      "duration_ms": 149.299,
+      "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_digest": "27c4a39d34ece4cbc66cc59cb0870c7abe4cc0a5f009205bdd0ea06a93f8b3ac",
+      "passed": true,
+      "details": "...\n----------------------------------------------------------------------\nRan 3 tests in 0.007s\n\nOK"
+    }
+  ],
+  "input_digest": "5c4a47b201b3f4875fc062d66cb0d76d378c574c646d673afc2590c3aff46809",
+  "spec_digest": "73bd3978d02a6b6812c228a0f0eea5a145aaf67cd572d2afb126ca296d689305",
+  "content_digest": "6ae20c168558d68aee735394b1a812a51b13384aeb2e78f0cd78f2f4d0909f9e",
+  "validation_scope": "offline_contract",
+  "real_file_checked": false
+}

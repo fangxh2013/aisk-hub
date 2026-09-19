@@ -1,0 +1,20 @@
+version: 1.0.0
+description: Token效率与低重复上下文的离线可验证门禁
+estimator:
+  chars_per_token: 4
+  fixed_envelope_tokens: 600
+budgets:
+  max_single_skill_tokens: 2200
+  max_task_context_tokens: 4500
+  max_duplicate_line_ratio: 0.20
+  max_policy_files: 12
+public_instruction_files:
+- agent-skills/skills/ai-worktree/SKILL.md
+- agent-skills/skills/engineering-discipline/SKILL.md
+- agent-skills/skills/security/SKILL.md
+principles:
+- 常驻规则只保留安全、身份、验收和路由约束
+- 任务上下文按需加载，禁止把全部技能正文拼进每次请求
+- 动态事实通过 MCP 或本地快照获取，不写入常驻提示词
+- 交接优先传摘要、差异、哈希和事件ID，不重复传完整日志
+- 省 Token 不得删除权限、隐私、高危操作和验证门禁

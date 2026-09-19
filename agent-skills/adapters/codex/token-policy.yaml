@@ -1,0 +1,39 @@
+version: 1
+tool: codex
+contract_source: public-token-runtime
+do_not_duplicate_core_policy: true
+verification:
+  status: offline_contract
+  runtime_status: dry-run
+  real_client_validation: not_integrated
+discovery:
+  project_path: .codex/hooks.json
+  skill_paths:
+  - .codex/skills/
+  - ~/.codex/skills/
+session:
+  capability: structured
+  sources:
+  - CODEX_THREAD_ID
+  - CODEX_SESSION_ID
+  - explicit_session_argument
+modes:
+  supported:
+  - lite
+  - standard
+  - deep
+  - emergency
+  default: standard
+budget:
+  default_tokens: 4500
+  max_tokens: 4500
+  estimator: public-token-runtime
+fail_to_full:
+  enabled: true
+  on_budget_error: emergency
+  preserve_safety_privacy_verification: true
+  never_bypass_authorization: true
+dialog:
+  high_risk_title_template: '{action}-{tool}｜{task_id}'
+  example: 'git推送-codex｜T006'
+  missing_identity: fail_closed

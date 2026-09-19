@@ -1,0 +1,179 @@
+version: 2.0.0
+strategy: B-Compatible-Parallel
+description: 26个旧技能向9大精益规范技能的确定性映射表（逻辑路由别名，严禁使用symlink）
+routing_mechanism: logical_alias_in_kernel
+migration_contract:
+  canonical_count: 9
+  legacy_alias_count: 26
+  compatibility_aliases:
+  - sec-review
+  - db-design
+  alias_deletion_policy: retain_until_zero_references_and_rollback_window
+skills:
+  web-engineering:
+    display_name: 前端工程闭环技能
+    legacy_sources:
+    - dev-web-code
+    - element-plus-patterns
+    - vue3-crud-page
+    - state-management
+    - frontend-review
+    - frontend-testing
+    aliases:
+    - dev-web-code
+    - vue3-crud-page
+    - element-plus-patterns
+    - state-management
+    - frontend-review
+    - frontend-testing
+    retained_capabilities:
+    - Vue 3 页面与路由动态挂载
+    - Element Plus 表格/表单/弹窗 CRUD 模式
+    - 湖北新华 biz-* 专有菜单图标契约
+    - Pinia 状态最小化使用原则
+    - v-hasPermi 权限指令与字典联动
+    - Vitest 单元测试与构建门禁 (build:dev)
+    gates:
+    - npm_or_pnpm_build
+    - no_private_data_leak
+    - front_test_pass
+  backend-engineering:
+    display_name: 后端微服务工程技能
+    legacy_sources:
+    - dev-code
+    - api-design
+    - ruoyi-module-scaffold
+    - backend-testing
+    aliases:
+    - dev-code
+    - api-design
+    - ruoyi-module-scaffold
+    - backend-testing
+    retained_capabilities:
+    - 若依 Cloud 四层规范 (Controller/Service/Mapper/XML/Feign)
+    - RESTful 统一响应结构 R<T> 与业务错误码
+    - MyBatis-Plus 分页与安全动态 SQL
+    - Mockito 单元测试门禁与模块定向编译 (mvn compile -pl)
+    - 多数据源 @DS 与分布式事务一致性
+    gates:
+    - maven_targeted_compile
+    - mockito_unit_tests
+    - no_private_data_leak
+  ops-workbench:
+    display_name: 环境运维与排障工作台
+    legacy_sources:
+    - ops
+    - k3s-deployment
+    - docker-build
+    - jenkins-ci
+    aliases:
+    - ops
+    - k3s-deployment
+    - docker-build
+    - jenkins-ci
+    retained_capabilities:
+    - 环境拓扑定位与端口查询 (aisk env)
+    - K8s/K3s Pod CrashLoopBackOff 只读排障
+    - Jenkins Job 自动化构建追溯与日志提取
+    - Nacos DataId 配置核对
+    - AI 只读安全铁律 (严禁线上执行写命令)
+    gates:
+    - readonly_policy_enforcement
+    - mcp_audit_logged
+  engineering-discipline:
+    display_name: 研发纪律与工程方法论
+    legacy_sources:
+    - brainstorming
+    - change-safety
+    - systematic-debugging
+    - pre-commit-review
+    - dev-rules
+    - git-flow
+    aliases:
+    - brainstorming
+    - change-safety
+    - systematic-debugging
+    - pre-commit-review
+    - dev-rules
+    - git-flow
+    retained_capabilities:
+    - 'Stage 1 需求澄清 (Clarify): 目标、边界、验收准则前置'
+    - 'Stage 2 变更安全 (Safety): 确定最小验证门槛与受影响范围'
+    - 'Stage 3 根因排查 (Debug): 日志证据分层复现，禁止盲改'
+    - 'Stage 4 跨层自审 (Pre-commit): 后端+前端+SQL+权限一致性核验'
+    - 'Git 分支规范与中文提交约定 (type: 中文改动)'
+    gates:
+    - acceptance_criteria_defined
+    - pre_commit_cross_check
+  security:
+    display_name: 安全合规与代码防御技能 (独立门禁)
+    legacy_sources:
+    - security-review
+    aliases:
+    - security-review
+    - sec-review
+    retained_capabilities:
+    - 认证鉴权与 JWT/Token 越权检测 (IDOR 防御)
+    - SQL 注入与动态拼装 AST 级审计
+    - XSS/SSRF 与文件上传后缀/MIME 穿透检查
+    - 敏感数据接口脱敏规则 (手机号/身份证/金融字段)
+    - 高危动作强制挂载安全门禁
+    gates:
+    - security_audit_clean
+    - no_hardcoded_secrets
+  ai-worktree:
+    display_name: 多 AI 并行工作区调度
+    legacy_sources:
+    - ai-worktree
+    aliases:
+    - ai-worktree
+    retained_capabilities:
+    - 任务状态机流转
+    - 租约管理与 Fencing Token 防僵尸并发
+    - 多工具 (Codex, Claude, Antigravity, WorkBuddy 等) 隔离工作区
+    - Mac 与 Windows 本地 SQLite + Handoff 事件包协议
+    gates:
+    - state_transition_valid
+    - fencing_token_verified
+  dev-release:
+    display_name: 发版受影响分析与清单比对
+    legacy_sources:
+    - dev-release
+    aliases:
+    - dev-release
+    retained_capabilities:
+    - 本地分支与 origin/dev 全自动差异比对
+    - 受影响微服务拓扑自动化抽取
+    - 待执行 Flyway DDL 脚本聚类
+    - 待同步 Nacos 与 Jenkins Job 清单
+    gates:
+    - dry_run_diff_verified
+  prod-log-analysis:
+    display_name: 生产日志智能归因分析
+    legacy_sources:
+    - prod-log-analysis
+    aliases:
+    - prod-log-analysis
+    retained_capabilities:
+    - 生产 ELK 报错聚类与时间窗频次统计
+    - 结合 git blame 自动锁定改动责任人
+    - Unknown column / DDL 漏跑智能探针
+    gates:
+    - readonly_strict_tunnel
+    - privacy_redacted
+  db-workbench:
+    display_name: 数据库建模与跨环境对齐
+    legacy_sources:
+    - database-design
+    - db-schema-backup
+    aliases:
+    - database-design
+    - db-design
+    - db-schema-backup
+    retained_capabilities:
+    - MySQL 8.0 设计红线 (大字段分离/索引最左前缀/无物理外键)
+    - DEV/PRE/PROD 纯 DDL 导出与结构快照
+    - 基于 DEV 基线的跨环境幂等对齐脚本生成
+    gates:
+    - ddl_idempotent_check
+    - no_drop_or_truncate

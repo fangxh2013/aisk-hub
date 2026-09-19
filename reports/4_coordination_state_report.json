@@ -1,0 +1,41 @@
+{
+  "report_id": "4_coordination_state_report",
+  "report_type": "CoordinationStateValidation",
+  "run_id": "971e199d-c315-44c6-a087-871f2aa8a202",
+  "git_commit": "53aa9dfeee41822c43e422eaacbf6b17a6e64bda",
+  "worktree_dirty": true,
+  "command": "python3 tools/verify_spec.py",
+  "started_at": "2026-09-19T12:38:14.242+00:00",
+  "finished_at": "2026-09-19T12:38:14.242+00:00",
+  "duration_ms": 8.728,
+  "offline_validated": true,
+  "passed": true,
+  "score": 100.0,
+  "checks": [
+    {
+      "check_id": "coordination_cas_fencing_outbox",
+      "command": "python3 tools/verify_spec.py",
+      "exit_code": 0,
+      "duration_ms": 7.732,
+      "stdout_digest": "",
+      "stderr_digest": "",
+      "passed": true,
+      "details": "SQLite CAS、actor 隔离、stale fencing 拒绝、事务 Outbox 导出通过"
+    },
+    {
+      "check_id": "coordination_schema_consistency",
+      "command": "python3 tools/verify_spec.py",
+      "exit_code": 0,
+      "duration_ms": 0.996,
+      "stdout_digest": "",
+      "stderr_digest": "",
+      "passed": true,
+      "details": "{'event_count': 13, 'transition_count': 14}"
+    }
+  ],
+  "input_digest": "5c4a47b201b3f4875fc062d66cb0d76d378c574c646d673afc2590c3aff46809",
+  "spec_digest": "73bd3978d02a6b6812c228a0f0eea5a145aaf67cd572d2afb126ca296d689305",
+  "content_digest": "f9c308d05a9877f5a3c87accfcaf61f01c906af06f2497b3341d15458e34e65f",
+  "validation_scope": "offline_contract",
+  "real_file_checked": false
+}

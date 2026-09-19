@@ -1,0 +1,39 @@
+{
+  "report_id": "token_runtime_baseline",
+  "report_type": "TokenRuntimeBenchmark",
+  "benchmark_version": "1.0.0",
+  "validation_scope": "offline_contract",
+  "offline_contract_score": 100.0,
+  "offline_contract_certified": true,
+  "real_runtime_score": null,
+  "real_runtime_certified": false,
+  "runtime_status": "offline-only",
+  "real_runtime_validation": {"codex": "not_run", "claude": "not_run", "antigravity": "not_run", "workbuddy": "not_run"},
+  "token_policy": {
+    "version": "1.0.0",
+    "default_mode": "standard",
+    "high_risk_mode": "deep",
+    "evidence_fallback_mode": "emergency",
+    "uncertain_evidence_states": ["uncertain", "conflict", "missing"],
+    "protected_rules": ["security", "privacy", "verification"],
+    "budget_behavior": "trim_optional_only",
+    "legacy_static_contract": "spec/token-efficiency.yaml"
+  },
+  "tool_policies": {
+    "codex": "agent-skills/adapters/codex/token-policy.yaml",
+    "claude": "agent-skills/adapters/claude/token-policy.yaml",
+    "antigravity": "agent-skills/adapters/antigravity/token-policy.yaml",
+    "workbuddy": "agent-skills/adapters/workbuddy/token-policy.yaml"
+  },
+  "golden_tasks": {"fixture": "agent-skills/tests/test_token_runtime/golden_tasks.json", "cases": 6},
+  "digests": {
+    "fixture": "a55656f948be2a02459a4cf915fc5bb65b38f8bf5902fb60bd1c1e9101dd3623",
+    "policy": "5a28ca68a2b46b67e1061f98a970761a41772d272dfacb861f1533d6ef49db67"
+  },
+  "command": "PYTHONPATH=. python3 -m unittest discover -s tests -p 'test_*.py' (cwd=agent-skills)",
+  "notes": [
+    "Offline score covers deterministic contract tests only; it is not a tokenizer or model accuracy measurement.",
+    "No client, external system, credential store, or network was contacted.",
+    "real_runtime_score remains null until each client is actually exercised and evidenced."
+  ]
+}

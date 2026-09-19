@@ -1,0 +1,87 @@
+version: 2.0.0
+storage_architecture:
+  primary_truth: SQLite (~/.aisk-runtime/state.db)
+  transactional_outbox: outbox_events table
+  audit_export: JSONL streaming from outbox (~/.aisk-runtime/events/)
+  sqlite_pragmas:
+  - PRAGMA journal_mode = WAL
+  - PRAGMA synchronous = NORMAL
+  - PRAGMA busy_timeout = 5000
+  transaction_guarantee: SQLite WAL + 事务 + CAS 条件更新 + 唯一约束 (严禁宣称行级锁)
+coordination_modes:
+  local_mode: 单机多进程：共享本地 state.db，WAL 模式并发安全
+  handoff_mode: 跨机协同 (Mac/Win)：通过签名事件包或 git 分支同步，严禁在网络盘 (SMB/NFS) 挂载同一个 SQLite 文件
+  server_mode: 未来扩展：可选的远程中央协调服务
+concurrency_control:
+  version_cas: UPDATE tasks SET status=:new, version=version+1 WHERE task_id=:id AND
+    version=:expected
+  fencing_token_rule: 每次claim/takeover递增fencing_token；后续操作写入校验fencing_token等于当前持有值，旧token操作直接抛出StaleFencingTokenException
+  default_lease_ttl_seconds: 1800
+  heartbeat_interval_seconds: 300
+states:
+- Unassigned
+- Claimed
+- InCheck
+- Ready
+- Landed
+- Promoted
+- Paused
+- Conflicted
+- Expired
+- Aborted
+transitions:
+- from: None
+  to: Unassigned
+  event: task.created
+- from: Unassigned
+  to: Claimed
+  event: task.claimed
+  rule: 分配初始fencing_token=1
+- from: Claimed
+  to: Claimed
+  event: task.heartbeat
+  rule: 刷新租约截止时间
+- from: Claimed
+  to: InCheck
+  event: task.checked
+  rule: 门禁验证必须全部pass
+- from: InCheck
+  to: Ready
+  event: task.ready
+  rule: 已生成待合并commit
+- from: Ready
+  to: Landed
+  event: task.landed
+  rule: 必须捕获系统原生弹窗确认
+- from: Landed
+  to: Promoted
+  event: task.promoted
+  rule: 已合并到主干分支
+- from: Claimed
+  to: Paused
+  event: task.paused
+  rule: 临时交接/离开
+- from: Paused
+  to: Claimed
+  event: task.claimed
+  rule: 递增fencing_token
+- from: Claimed
+  to: Expired
+  event: task.expired
+  rule: 心跳超时自动标记
+- from: Expired
+  to: Claimed
+  event: task.claimed
+  rule: 崩溃接管，递增fencing_token
+- from: Claimed
+  to: Conflicted
+  event: task.conflicted
+  rule: Git冲突或CAS并发冲突
+- from: Conflicted
+  to: Claimed
+  event: task.claimed
+  rule: 解决冲突后继续
+- from: '*'
+  to: Aborted
+  event: task.aborted
+  rule: 回滚放弃任务

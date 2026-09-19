@@ -1,0 +1,9 @@
+---
+trigger: always_on
+---
+
+# 任务规则（{{task_id}} {{title}}）
+
+- 先完整阅读并遵守任务目录根的 `AGENT-WORKTREE.md`；动手前 `aisk task claim {{task_id}} --tool antigravity`，被他人持有中只读。
+- 只在本任务目录内读写，只提交到任务分支；随手 `aisk task note` 记进度，离开前 `aisk task pause`。
+- 禁止：git push / fetch / pull / stash / worktree / config / update-ref；checkout 或合并受保护分支；新建 worktree 模式或 branch 隔离模式的子代理；另开同一件事的任务。

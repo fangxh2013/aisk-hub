@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AiskEvidenceReport",
+  "type": "object",
+  "required": [
+    "report_id",
+    "report_type",
+    "run_id",
+    "git_commit",
+    "worktree_dirty",
+    "command",
+    "started_at",
+    "finished_at",
+    "duration_ms",
+    "offline_validated",
+    "passed",
+    "score",
+    "checks",
+    "input_digest",
+    "spec_digest",
+    "content_digest"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "report_id": {
+      "type": "string"
+    },
+    "report_type": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "git_commit": {
+      "type": "string"
+    },
+    "worktree_dirty": {
+      "type": "boolean"
+    },
+    "command": {
+      "type": "string"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "duration_ms": {
+      "type": "number",
+      "minimum": 0
+    },
+    "offline_validated": {
+      "type": "boolean"
+    },
+    "passed": {
+      "type": "boolean"
+    },
+    "score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "input_digest": {
+      "type": "string"
+    },
+    "spec_digest": {
+      "type": "string"
+    },
+    "content_digest": {
+      "type": "string"
+    },
+    "validation_scope": {
+      "type": "string",
+      "enum": [
+        "offline_contract",
+        "real_file",
+        "real_runtime"
+      ]
+    },
+    "real_file_checked": {
+      "type": "boolean"
+    },
+    "runtime_status": {
+      "type": "string",
+      "enum": [
+        "offline-only",
+        "file-checked",
+        "client-verified"
+      ]
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "check_id",
+          "command",
+          "exit_code",
+          "duration_ms",
+          "stdout_digest",
+          "stderr_digest",
+          "passed",
+          "details"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "check_id": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "exit_code": {
+            "type": "integer"
+          },
+          "duration_ms": {
+            "type": "number"
+          },
+          "stdout_digest": {
+            "type": "string"
+          },
+          "stderr_digest": {
+            "type": "string"
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "details": {
+            "type": "string"
+          },
+          "artifact_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,68 @@
+version: 2.1.0
+levels:
+  PUBLIC:
+    definition: 公共任务调度引擎、通用工作流规范、开源工具抽象、Schema定义
+    target: aisk-hub (Public GitHub)
+    leak_severity: none
+  INTERNAL_TEMPLATE:
+    definition: 脱敏后的业务流程架构、字段模板、示例配置文件
+    target: aisk-private / 团队共享
+    leak_severity: low
+  CONFIDENTIAL:
+    definition: 新华内部微服务真实拓扑、实际端口映射、生产日志结构、内网IP
+    target: aisk-private / 本机专有
+    leak_severity: high_block
+  SECRET:
+    definition: 生产/开发账密、Token、API密钥、私钥、SOPS明文
+    target: 严禁入库 (SOPS+age / OS Keychain 代持)
+    leak_severity: critical_block
+ci_enforcement:
+  git_history_scope: 公开 master 与显式公开 Tag 的全历史提交；本地 aisk task 分支属于运行态，不进入公开发布面
+  working_tree_scope: 工作区全量文本文件
+  export_mode: allowlist_only
+  block_action: exit_1_fail_ci
+# 规则唯一真源。工作区扫描（scan）与 Git 历史扫描（scan_git_history）都必须
+# 从这里派生，禁止在代码里再手抄一份——两份手抄规则已经漂移过一次：
+# 历史侧曾用裸 /Users/[^[:space:]]* 把宿主工具路径误报成泄漏，同时漏掉了 10.x/172.x 内网段。
+#
+# 每条规则两个正则：
+#   pattern   —— 权威判定规则，Python re 语法，命中即阻断。
+#   prefilter —— 仅供 git grep 粗筛的 POSIX ERE，必须严格覆盖 pattern 的命中集合
+#                （只允许更宽，不允许更窄），把待判定行缩小到可接受规模。
+#                收紧 prefilter 会让历史扫描漏检，等同于拆门禁，回归用例会校验覆盖关系。
+regex_rules:
+# 内网 IPv4 段：10/8、192.168/16、172.16-31/12。命中即真实拓扑或联调地址可能入公开仓。
+- id: rfc1918_ipv4
+  pattern: \b(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b
+  prefilter: 192\.168\.[0-9]|10\.[0-9]|172\.(1[6-9]|2[0-9]|3[01])
+  description: 挡内网 IPv4 段，防止生产拓扑或联调地址进公开仓
+# 硬编码账密或令牌。判定护栏在引擎里：只对 .env/.json/.yaml/.yml/.toml/.ini/.cfg
+# 后缀生效，文档与源码里的示例词不算泄漏；change-me/example/placeholder 等占位值显式放行。
+- id: hardcoded_secret
+  pattern: (?i)(?:password|passwd|secret|api[_-]?key|access[_-]?token|private[_-]?key)\s*[:=]\s*['\"](?!change[-_ ]?me|example|placeholder|dummy|test)[^'\"]+['\"]
+  prefilter: password|passwd|secret|token|api[_-]?key|private[_-]?key
+  description: 挡配置文件里的硬编码口令与令牌，占位值放行
+# 旧工作树根目录：/Users/<user>/work/<旧内核目录名>，暴露本机私有工作区布局。
+- id: private_path
+  pattern: /Users/[^\s/]+/work/(hbxhzt-new|agent-skills-worktrees|xinhua-worktrees|xinhua-skills)
+  prefilter: /Users/
+  description: 挡旧工作树绝对路径，覆盖历史遗留目录名
+# 私有家目录下的内核运行态：.aisk 与 hbxhzt 工作区；宿主目录也不得带用户绝对路径。
+- id: private_home
+  pattern: /Users/[^\s/]+/(?:\.aisk|work/hbxhzt)
+  prefilter: /Users/
+  description: 挡本机私有内核目录的绝对路径，宿主工具目录不算
+- id: host_absolute_path
+  pattern: /Users/[^\s/]+/\.(?:gemini|codex|claude|workbuddy)(?:/|\b)
+  prefilter: /Users/
+  description: 挡宿主工具配置中的用户绝对路径，公开文档必须使用环境变量或波浪号
+# 裸项目名标记：即使没有路径上下文，出现内部项目代号也视为泄漏。
+- id: private_project_marker
+  pattern: (?i)(?:hbxhzt|xinhua-platform|etjbooks)
+  prefilter: hbxhzt|xinhua-platform|etjbooks
+  description: 挡裸内部项目代号
+# 私有域名：内部域名出现在配置、脚本或文档里。
+- id: private_domain
+  pattern: '[a-zA-Z0-9_-]+\.(etjbooks\.com\.cn|hbxhzt)'
+  prefilter: etjbooks\.com\.cn|hbxhzt
+  description: 挡内部域名

@@ -1,0 +1,31 @@
+{
+  "report_id": "6_privacy_scan_report",
+  "report_type": "PrivacyScanValidation",
+  "run_id": "87cfad5f-b0da-4128-b3c7-639a225053fc",
+  "git_commit": "53aa9dfeee41822c43e422eaacbf6b17a6e64bda",
+  "worktree_dirty": true,
+  "command": "python3 tools/verify_spec.py",
+  "started_at": "2026-09-19T12:38:14.406+00:00",
+  "finished_at": "2026-09-19T12:38:14.406+00:00",
+  "duration_ms": 3715.221,
+  "offline_validated": true,
+  "passed": true,
+  "score": 100.0,
+  "checks": [
+    {
+      "check_id": "public_privacy_verify",
+      "command": "python3 tools/verify_spec.py",
+      "exit_code": 0,
+      "duration_ms": 3715.221,
+      "stdout_digest": "",
+      "stderr_digest": "",
+      "passed": true,
+      "details": "公开 allowlist 与当前可达 Git 历史扫描通过"
+    }
+  ],
+  "input_digest": "5c4a47b201b3f4875fc062d66cb0d76d378c574c646d673afc2590c3aff46809",
+  "spec_digest": "73bd3978d02a6b6812c228a0f0eea5a145aaf67cd572d2afb126ca296d689305",
+  "content_digest": "d214940900fd1d1161d5d027a2c83e1caad4101b47b12006998c2b82a82bc554",
+  "validation_scope": "offline_contract",
+  "real_file_checked": false
+}

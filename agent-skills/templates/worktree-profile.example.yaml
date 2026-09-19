@@ -1,0 +1,60 @@
+# 新项目示例：复制到当前系统 ~/.aisk/profiles/<项目>.yaml，按真实项目修改后先 aisk task init 预览，再 bind 预览。
+# Mac 与 Windows 使用相同 project、仓库键和分支语义；各自声明本地路径。
+# 注意：档案用 aisk 的 YAML 子集——列表一律写成「- 项」的块格式，不支持 [a, b] 行内列表。
+project: example
+repos:
+  backend: ~/work/example/backend
+  frontend: ~/work/example/frontend
+worktrees:
+  data_root: ~/work/example-tasks
+  # Windows 档案：data_root 放虚拟机本地盘（如 C:/workspace/example-tasks），并必须声明 hub（Mac 交换库的共享路径）。
+  # hub: <shared-exchange-path>
+  integration_branch: integration
+  protected:
+    - integration
+    - main
+  task_prefix: T                     # Windows 档案写 W，两端编号不碰撞
+  branch_prefix: tasks/
+  share_activity: true               # 两端都启用，才能互看对方进行中任务的只读摘要
+  lease: {idle_minutes: 30, claimable_minutes: 120}
+  ports: {base: 20000, block: 10}
+  quotas: {active: 8, builds: 2}
+  # 推送护栏：任务 worktree 已禁止一切传输协议；这里可再把 Git 服务地址前缀改写为不可达。
+  # push_block_prefixes:
+  #   - <git-service-prefix>
+  # 任务环境变量：支持 {task_id} {task_name} {task_dir} {port_web} {port_gateway}；不要放凭据。
+  task_env:
+    APP_INSTANCE: "task-{task_id}"
+  # 项目专属的禁用命令（键是正则，不加引号；值是拒绝理由），守卫在 sh -c、eval 等包装里同样生效。
+  forbidden_commands:
+    scripts/bootstrap\.sh: 任务目录里不要运行初始化脚本，任务引擎已完成等价准备
+  task_rules:
+    - 本地服务只用任务分配的端口，不连接共享环境
+  handoff_sections:
+    - 修改内容
+    - 验证结果
+    - 未验证风险
+    - 部署说明
+  repos:
+    backend:
+      profile_repo: backend
+      trunk: main
+      push_branch: integration
+      promote: push-only            # 只推集成分支；合入主干按项目 PR 规则
+      anchors:
+        - main
+      gate:
+        kind: command
+        argv:
+          - make
+          - check
+    frontend:
+      profile_repo: frontend
+      trunk: main
+      push_branch: integration
+      promote: push-only
+      anchors:
+        - main
+      gate: {kind: npm-build, script: build}
+# 老项目迁移时可额外声明 worktrees.legacy.root / exclude / admin_globs。
+# 不知道构建命令时先补齐档案，不能把门禁改为 none 后宣称已验证。

@@ -1,0 +1,7 @@
+## 多 AI 并行工作区（aisk task）
+
+- 启动后若**当前目录或任一上级目录**存在 `AGENT-WORKTREE.md`，必须先完整读取并严格遵守，其优先级高于仓库 `AGENTS.md` 中与之冲突的部分；不存在时本节自动失效。
+- 接到开发任务先 `aisk task find <关键词>`：已有同一任务就 `aisk task claim` 认领续做，**禁止另开**；找不到才由操作者 `aisk task new`。
+- 任务目录里：只提交到任务分支；随手 `aisk task note` 记进度，离开前 `aisk task pause`；禁止 push/fetch/stash/worktree/改 git 配置；交付走 `aisk task check → aisk task ready → aisk task land --dry-run → aisk task land`，真实落地必须由操作者在 `aisk task` 弹窗点击“落地”，上主干由操作者 `aisk task promote`；前端、后端、文档各自 ready/land/promote，一个仓库被拦不拦其他仓库，用 `--repos` 分开交付。
+- 启用项目策略时，禁止任何命令合并、改写或推送 `main/master`；冲突必须比较共同祖先、两侧提交时间和业务意图逐块解决，禁止 ours/theirs 一键覆盖。
+- 锚点目录只允许任务引擎操作；Windows 侧不得写 mac 的仓库与锚点。说明见 agent-skills 的 `WORKTREE.md` 与技能 `ai-worktree`。
