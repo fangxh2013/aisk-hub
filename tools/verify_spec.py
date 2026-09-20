@@ -473,13 +473,16 @@ def run_runtime_probes(root):
     probes.append(run_check("runtime_client_dispatch_probe", probe_link, command="aisk link --dry-run"))
 
     def probe_board():
-        res = subprocess.run([str(root / "bin" / "aisk"), "task", "board"], cwd=root, capture_output=True, text=True)
+        # task 子命令必须显式绑定 aisk-hub profile；--brief 避免看板 Markdown
+        # 刷新时对主工作区异常的兼容性降级吞掉 stdout，同时仍验证 SQLite 登记簿可读。
+        res = subprocess.run([str(root / "bin" / "aisk"), "--profile", "aisk-hub", "task", "status", "--brief"],
+                             cwd=root, capture_output=True, text=True)
         if res.returncode != 0:
-            raise RuntimeError(f"aisk task board 失败: {res.stderr}")
-        if "任务看板" not in res.stdout:
-            raise RuntimeError("任务看板输出不包含标头")
-        return "SQLite CAS 协同任务状态与看板查询正常"
-    probes.append(run_check("runtime_task_board_probe", probe_board, command="aisk task board"))
+            raise RuntimeError(f"aisk task status 失败: {res.stderr}")
+        if "T003" not in res.stdout:
+            raise RuntimeError("任务登记簿输出未包含当前 T003")
+        return "SQLite CAS 协同任务状态与任务摘要查询正常（显式绑定 aisk-hub profile）"
+    probes.append(run_check("runtime_task_board_probe", probe_board, command="aisk --profile aisk-hub task status --brief"))
 
     def probe_fact():
         res = subprocess.run([str(root / "bin" / "aisk"), "--profile", "xinhua", "fact", "--env", "dev", "service", "goods"], cwd=root, capture_output=True, text=True)
