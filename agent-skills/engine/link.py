@@ -58,13 +58,19 @@ RETIRED = {
 # Codex 的旧适配曾把技能写到 ~/.codex/skills；现在官方用户级发现目录是
 # ~/.agents/skills。这里的映射用于把已经被新内核替代的旧名字**归档**，而不是
 # 删除。它只在 Codex 目标端执行，避免把 Claude 的改名约定带到其他工具。
+# 值必须是 **canonical 名**：`_archive_codex_shadows` 拿 `new in wanted` 判定，
+# 而 wanted 里的键已经全部是 `target_name()` 的产物（即 canonical 名）。
+# 迁移后这里曾留下旧名（ops / git-flow / security-review…），条件恒为假，
+# 归档整段静默失效——旧同名技能会继续留在选择器里与新技能抢触发。
 CODEX_SHADOWS = {
-    "dev-ops": "ops", "dev-ops-lite": "ops", "prod-ops": "ops",
-    "prod-ops-lite": "ops", "prod-k8s": "ops", "uat-ops": "ops",
-    "v2-prod-ops": "ops", "git-commit": "git-flow", "git-merge-dev": "git-flow",
-    "sec-review": "security-review", "db-design": "database-design",
-    "ruoyi-scaffold": "ruoyi-module-scaffold", "element-plus": "element-plus-patterns",
-    "k3s-deploy": "k3s-deployment",
+    "dev-ops": "ops-workbench", "dev-ops-lite": "ops-workbench",
+    "prod-ops": "ops-workbench", "prod-ops-lite": "ops-workbench",
+    "prod-k8s": "ops-workbench", "uat-ops": "ops-workbench",
+    "v2-prod-ops": "ops-workbench",
+    "git-commit": "engineering-discipline", "git-merge-dev": "engineering-discipline",
+    "sec-review": "security", "db-design": "db-workbench",
+    "ruoyi-scaffold": "backend-engineering", "element-plus": "web-engineering",
+    "k3s-deploy": "ops-workbench",
 }
 
 def write_kernel_pointer(kernel_root):

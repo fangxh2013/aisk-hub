@@ -773,6 +773,70 @@ def outside_origin_url(cwd):
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def _command_dirs(command, cwd, depth=0):
+    """命令里 cd / git -C 指向的目录，按出现顺序返回（后面的 cd 覆盖前面的）。
+
+    WorkBuddy 的 PreToolUse 载荷里 cwd 恒为会话工作区根，通常不是 git 仓库；
+    真正执行 push 的目录只写在命令文本里（含 `sh -c` 之类的包装层），所以判定
+    远端必须回到命令本身。只读解析，解析不出来就返回空列表，调用方回退到 cwd。"""
+    if depth > MAX_DEPTH:
+        return []
+    base = Path(str(cwd or os.getcwd())).expanduser()
+    text, substitutions = extract_substitutions(str(command))
+    found = []
+    for source in [text] + [str(item) for item in substitutions]:
+        try:
+            tokens = tokenize(source)
+        except ValueError:
+            continue
+        current = base
+        for argv in split_simple(tokens):
+            argv = [str(v) for v in argv]
+            script = None
+            for index, token in enumerate(argv[:-1]):
+                option = token.strip("'\"")
+                program = prog_name(token, set())
+                if program in SHELLS:
+                    script = shell_script(program, argv[index + 1:])
+                    break
+                if program == "cd":
+                    target = argv[index + 1].strip("'\"")
+                    if target and not target.startswith("-"):
+                        found.append(os.path.normpath(os.path.join(current, os.path.expanduser(target))))
+                        current = Path(found[-1])
+                elif option == "-C":
+                    found.append(argv[index + 1].strip("'\""))
+                elif option.startswith("-C") and len(option) > 2:
+                    found.append(option[2:].strip("'\""))
+            if script is not None:
+                # 包装层里的 cd 是相对外层当前目录的，带着 current 递归下去
+                found.extend(_command_dirs(script, current, depth + 1))
+    resolved = []
+    for target in reversed(found):  # push 通常跟在最后一个 cd 后面
+        candidate = Path(os.path.normpath(os.path.join(base, os.path.expanduser(target))))
+        if candidate.is_dir() and candidate not in resolved:
+            resolved.append(candidate)
+    return list(reversed(resolved))
+
+
+def outside_cwd_candidates(command, cwd):
+    """push 可能落在的目录：命令里的 cd/git -C 目标优先，工具上报的 cwd 兜底。"""
+    base = Path(str(cwd or os.getcwd())).expanduser()
+    candidates = _command_dirs(command, cwd)
+    if base not in candidates:
+        candidates.append(base)
+    return candidates
+
+
+def outside_push_context(candidates):
+    """在候选目录里找第一个能读到 origin 的，返回 (remote_url, 目录)。"""
+    for candidate in candidates:
+        url = outside_origin_url(candidate)
+        if url:
+            return url, str(candidate)
+    return "", str(candidates[-1]) if candidates else ""
+
+
 def _outside_forbidden_reasons(command, cwd):
     """读取可定位到的 profile 的 forbidden_commands；无 profile 仍能识别 git push。"""
     try:
@@ -915,10 +979,17 @@ def confirm_outside_high_risk(tool, normalized):
         return None
     command = str(normalized["command"])
     cwd = str(normalized.get("cwd") or os.getcwd())
-    reasons = _outside_forbidden_reasons(command, cwd)
+    # 工具上报的 cwd 常是会话工作区根（多半不是仓库），真正的执行目录要从命令里还原，
+    # 否则读不到 origin → 判不成公开远端 → 任务外 push 会被静默放行。
+    candidates = outside_cwd_candidates(command, cwd)
+    reasons = []
+    for candidate in candidates:
+        for reason in _outside_forbidden_reasons(command, candidate):
+            if reason not in reasons:
+                reasons.append(reason)
     hits = scan_outside_high_risk(command)
-    remote = outside_origin_url(cwd) if "push" in hits else ""
-    details = outside_push_details(command, cwd) if "push" in hits else None
+    remote, push_cwd = outside_push_context(candidates) if "push" in hits else ("", cwd)
+    details = outside_push_details(command, push_cwd) if "push" in hits else None
     if "push" in hits and is_public_remote(remote):
         host = _remote_host(remote)
         reasons.append(f"{OUTSIDE_CONFIRM_ACTIONS['push']} 将发布到公开远端 {host}")

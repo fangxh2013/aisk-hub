@@ -901,6 +901,33 @@ class GuardsAndHooks(Sandbox):
             self.assertIsNone(guards.evaluate(payload, "workbuddy-ai"))
         self.assertEqual(confirm.call_args.kwargs["tool"], "workbuddy-ai")
 
+    def test_workbuddy_outside_push_reads_remote_from_the_directory_in_the_command(self):
+        """载荷 cwd 是会话工作区根（不是仓库）时，远端必须按命令里 cd / git -C 指向的目录判定。
+
+        WorkBuddy 的 PreToolUse 载荷 cwd 恒为会话工作区根，若只用它读 origin 就读不到，
+        公开远端判不出来，任务外 push 会被静默放行。"""
+        repo = self.root / "repo"
+        workspace = self.root / "workspace"
+        repo.mkdir(parents=True, exist_ok=True)
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        def origin(cwd):
+            return "https://github.com/example/demo.git" if Path(cwd) == repo else ""
+
+        with patch.object(guards, "outside_origin_url", side_effect=origin), \
+                patch.object(guards.registry, "confirm_human", return_value=False) as confirm:
+            for command in (f"cd {repo} && git push origin master",
+                            f"git -C {repo} push origin master",
+                            f'sh -c "cd {repo} && git push origin master"'):
+                confirm.reset_mock()
+                payload = {"tool_name": "Bash", "cwd": str(workspace), "session_id": "wb-s1",
+                           "tool_input": {"command": command}}
+                reason = guards.evaluate(payload, "workbuddy")
+                self.assertIn("未获操作者确认", reason, command)
+                confirm.assert_called_once()
+                self.assertEqual(confirm.call_args.kwargs["repository"], "repo", command)
+                self.assertEqual(confirm.call_args.args[1], "确认推送")
+
     def test_workbuddy_outside_private_push_and_read_only_commands_do_not_prompt(self):
         payload = self.outside_payload()
         with patch.object(guards, "outside_origin_url", return_value="file:///tmp/demo.git"), \

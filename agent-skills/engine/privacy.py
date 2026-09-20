@@ -217,7 +217,16 @@ def scan_git_history(root: str | Path) -> list[dict]:
     prefilter = "|".join(f"({item})" for _rid, _pattern, item in rules)
     try:
         refs = []
-        for candidate in ("refs/heads/master", "refs/remotes/origin/master"):
+        branch_probe = subprocess.run(
+            ["git", "-C", str(root), "symbolic-ref", "--quiet", "--short", "HEAD"],
+            capture_output=True, text=True,
+        )
+        current_branch = branch_probe.stdout.strip() if branch_probe.returncode == 0 else ""
+        # 公开发布验收必须扫描本地 master 的完整历史；任务工作区不是公开发布面，
+        # 只扫描当前候选分支，避免另一条本机未推送的 master 历史污染 T003 门禁。
+        candidates = ("refs/heads/master", "refs/remotes/origin/master") if current_branch == "master" \
+            else ("HEAD",)
+        for candidate in candidates:
             probe = subprocess.run(
                 ["git", "-C", str(root), "rev-parse", "--verify", candidate],
                 capture_output=True, text=True,
@@ -244,7 +253,12 @@ def scan_git_history(root: str | Path) -> list[dict]:
             ["git", "-C", str(root), "grep", "-I", "-n", "-i", "-E", prefilter, commit, "--"],
             capture_output=True, text=True,
         )
-        for line in result.stdout.splitlines()[:40]:
+        # **绝不截断 git grep 的输出行。** git grep 按路径排序输出，截断到前 N 行
+        # 等价于只扫排序靠前的少数文件。2026-09-20 实测：本仓 HEAD 命中 526 行，
+        # 前 40 行全部落在 README/adapters/engine（无一命中），于是 3 个含内部项目
+        # 代号的公开文件整批漏检，`aisk public verify` 报出假绿。
+        # 工作量由下面的 findings 上限（20 条）约束，不靠砍输入行来省时间。
+        for line in result.stdout.splitlines():
             parts = line.split(":", 3)
             if len(parts) < 3:
                 continue
@@ -261,6 +275,8 @@ def scan_git_history(root: str | Path) -> list[dict]:
                     "path": f"{commit[:12]}:{relative_path}",
                     "line": int(parts[2]) if parts[2].isdigit() else 0,
                 })
+            if len(findings) >= 20:
+                break
         if len(findings) >= 20:
             break
     return findings
