@@ -44,7 +44,9 @@ agent-skills/skills/brainstorming/references/
 !agent-skills/tools/
 !agent-skills/tools/check_kernel_hygiene.py
 agent-skills/tests/*
+!agent-skills/tests/test_contracts.py
 !agent-skills/tests/test_action_context.py
+!agent-skills/tests/test_token_efficiency.py
 !agent-skills/tests/test_worktree.py
 !agent-skills/tests/protocol_worktree.sh
 **/__pycache__/
