@@ -1,6 +1,6 @@
 ---
 name: security
-description: 审查认证授权、输入输出、注入、文件处理、敏感信息和高风险操作。适用于安全评审、接口改动、上传下载和凭据处理。
+description: 审查认证授权、输入输出、注入、文件处理、敏感信息和高风险操作。适用于安全评审、接口改动、上传下载和凭据处理。勿用：一般接口实现→backend-engineering。触发：安全、安全审查、鉴权、认证、授权、JWT、Token、越权、越权风险、IDOR、SQL 注入、动态拼装、XSS、SSRF、文件上传、后缀、MIME、穿透、脱敏、接口脱敏、敏感字段、手机号、身份证、金融字段、限流、审计日志、凭据处理。
 metadata:
   version: 1.0.0
   agent_created: true

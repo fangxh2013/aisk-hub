@@ -1,6 +1,6 @@
 ---
 name: ops-workbench
-description: 以只读、可审计的方式定位服务、容器、配置、构建和运行故障。适用于部署核对、日志排障、健康检查和发布前环境确认。
+description: 以只读、可审计的方式定位服务、容器、配置、构建和运行故障。适用于部署核对、健康检查和发布前环境确认。勿用：写业务代码→backend-engineering、web-engineering，数据库建模→db-workbench，生产日志归因→prod-log-analysis。触发：运维、环境、服务在哪台机器、部署、部署核对、发版走哪个 Job、节点、命名空间、端口、网关、入口、镜像、镜像 tag、镜像体积、体积优化、Pod、起不来、CrashLoopBackOff、rollout、卡住、排查、容器、Docker、Dockerfile、多阶段构建、Deployment、YAML、评审 YAML、Jenkins、Jenkinsfile、流水线、Nacos、DataId、配置核对、只读查询、查数据、生产库、健康检查。
 metadata:
   version: 1.0.0
   agent_created: true

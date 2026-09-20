@@ -1,6 +1,6 @@
 ---
 name: dev-release
-description: 生成可审计的发布影响分析与准备清单，覆盖代码差异、数据库迁移、配置、构建和回滚。适用于发布前核对和变更交接。
+description: 生成可审计的发布影响分析与准备清单，覆盖代码差异、数据库迁移、配置、构建和回滚。适用于发布前核对和变更交接。勿用：环境运行时排障→ops-workbench，数据库结构建模→db-workbench。触发：发布、发版、上线、发布清单、部署清单、影响分析、受影响服务、代码差异、待执行 DDL、Flyway、迁移脚本、Nacos 变更、构建清单、需要构建哪些服务、回滚。
 metadata:
   version: 1.0.0
   agent_created: true

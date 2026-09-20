@@ -1,6 +1,6 @@
 ---
 name: backend-engineering
-description: 设计、实现和验证后端 API 与服务逻辑，覆盖契约、业务层、持久化、事务和测试。适用于接口开发、服务重构和后端缺陷修复。
+description: 设计、实现和验证后端 API 与服务逻辑，覆盖契约、业务层、持久化、事务和测试。适用于接口开发、服务重构和后端缺陷修复。勿用：前端页面与组件→web-engineering，数据库建模与结构对齐→db-workbench。触发：后端、接口、API、Controller、Service、Mapper、XML、Feign、统一响应、错误码、DTO、VO、分页查询、事务、幂等、鉴权接入、MyBatis、模块骨架、单元测试、定向编译。
 metadata:
   version: 1.0.0
   agent_created: true

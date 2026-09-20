@@ -1,6 +1,6 @@
 ---
 name: ai-worktree
-description: 管理多工具协作的隔离任务、租约、进度、验证和交付。适用于并行代理、任务接力、冲突预防和工作区恢复。
+description: 管理多工具协作的隔离任务、租约、进度、验证和交付。适用于并行代理、任务接力、冲突预防和工作区恢复。勿用：具体业务代码→backend-engineering、web-engineering，环境排障→ops-workbench。触发：并行、多个 AI、多工具、协作、互不干扰、任务、认领、接力、接手、交还、租约、工作区、隔离工作区、worktree、进度、下一步、交接单、冲突预防、恢复、抢救。
 metadata:
   version: 4.0.0
   agent_created: true

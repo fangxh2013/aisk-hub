@@ -1,6 +1,6 @@
 ---
 name: web-engineering
-description: 设计、实现和验证现代 Web 前端功能，覆盖页面、组件、状态、接口与测试。适用于前端页面改造、交互缺陷、组件复用和构建回归。
+description: 设计、实现和验证现代 Web 前端功能，覆盖页面、组件、状态、接口与测试。适用于前端页面改造、交互缺陷、组件复用和构建回归。勿用：后端接口与持久化→backend-engineering，数据库建模→db-workbench。触发：前端、页面、列表页、新增视图、增删改查、CRUD、表单校验、表格、分页、弹窗、对话框、组件、状态管理、Pinia、store、怎么组织、Vue、Element Plus、el-table、el-form、el-dialog、路由、字典、权限指令、级联选择、上传、Vitest、组件测试、前端构建、前端 review、前端审查、代码质量。
 metadata:
   version: 1.0.0
   agent_created: true
