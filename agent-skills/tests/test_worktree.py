@@ -1038,6 +1038,22 @@ class BindAndCli(Sandbox):
         self.assertIn("AISKHUB_DIALOG_TITLE", run.call_args.kwargs["env"])
         self.assertEqual(run.call_args.kwargs["env"]["AISKHUB_DIALOG_TITLE"], "git推送-workbuddy | T009 | backend")
 
+    def test_windows_publish_is_confirmed_and_never_force_pushes(self):
+        self.prof["worktrees"]["hub"] = str(self.root / "hub")
+        cfg = build_config(self.prof, "windows")
+        task = {"id": "W009", "repos": {"be": {"branch": "tasks/W009-demo", "ready_sha": "a" * 40}}}
+        with patch.object(tasks, "_hub_remote_url", return_value="file:///central/hub.git"), \
+             patch.object(tasks.git, "sha", return_value="a" * 40), \
+             patch.object(tasks.git, "out", side_effect=["", "a" * 40 + "\trefs/heads/tasks/W009-demo"]), \
+             patch.object(tasks.git, "run") as run, \
+             patch.object(registry, "confirm_human", return_value=True) as confirm, \
+             patch.object(tasks, "atomic_json"):
+            tasks.publish_to_hub(cfg, task, tool="workbuddy", sessions=["s-009"])
+        pushed = run.call_args.args[0]
+        self.assertEqual(pushed[0], "push")
+        self.assertNotIn("--force", pushed)
+        self.assertEqual(confirm.call_args.kwargs["context"].title, "git推送-workbuddy | W009 | be")
+
     def test_bind_plan_is_idempotent_and_replaces_legacy_blocks(self):
         home = self.root / "home"
         (home / ".claude").mkdir()

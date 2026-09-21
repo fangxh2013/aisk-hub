@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import actor, bind, gates, gitops as git, model
+from . import actor, bind, gates, gitops as git, model, registry
 from . import names
 from .config import WtConfig, WtError
 from ..action_context import ActionContext, ActionContextError

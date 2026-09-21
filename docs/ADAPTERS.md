@@ -8,11 +8,11 @@
 
 | 客户端 | 内核标识 | 会话标识来源 | 钩子机制 (Hooks) | 原生弹窗支持 | 适配目录 |
 | :--- | :--- | :--- | :---: | :---: | :--- |
-| **Codex** | `codex` | `CODEX_THREAD_ID` / `CODEX_SESSION_ID` | 弱依赖 (指令级) | ✅ AppleScript | `adapters/codex/` |
-| **Claude** | `claude` | `CLAUDE_CODE_SESSION_ID` | ✅ 原生 `settings.json` | ✅ AppleScript | `adapters/claude/` |
-| **Antigravity** | `antigravity` | `conversationId` | ✅ Stdio MCP 2.0 | ✅ AppleScript | `adapters/antigravity/` |
-| **WorkBuddy** | `workbuddy` | `CODEBUDDY_SESSION_ID` | ✅ `.codebuddy/settings.json` | ✅ AppleScript | `adapters/workbuddy/` |
-| **WorkBuddy AI** | `workbuddy-ai` | `CODEBUDDY_SESSION_ID` + `WORKBUDDY_CONFIG_DIR` | ✅ `.codebuddy/settings.json` | ✅ AppleScript | `adapters/workbuddy-ai/` |
+| **Codex** | `codex` | `CODEX_THREAD_ID` / `CODEX_SESSION_ID` | 弱依赖 (指令级) | ✅ macOS AppleScript / Windows WinForms | `adapters/codex/` |
+| **Claude** | `claude` | `CLAUDE_CODE_SESSION_ID` | ✅ 原生 `settings.json` | ✅ macOS AppleScript / Windows WinForms | `adapters/claude/` |
+| **Antigravity** | `antigravity` | `conversationId` | ✅ Stdio MCP 2.0 | ✅ macOS AppleScript / Windows WinForms | `adapters/antigravity/` |
+| **WorkBuddy** | `workbuddy` | `CODEBUDDY_SESSION_ID` | ✅ `.codebuddy/settings.json` | ✅ macOS AppleScript / Windows WinForms | `adapters/workbuddy/` |
+| **WorkBuddy AI** | `workbuddy-ai` | `CODEBUDDY_SESSION_ID` + `WORKBUDDY_CONFIG_DIR` | ✅ `.codebuddy/settings.json` | ✅ macOS AppleScript / Windows WinForms | `adapters/workbuddy-ai/` |
 
 ---
 
