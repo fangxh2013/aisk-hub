@@ -7,10 +7,8 @@
     python3 tools/check_doc_drift.py --list   # 只打印注册表，看它到底覆盖了什么
 退出码：0=一致，1=有漂移或断言失锚
 
-**为什么需要它**：文档里的数字是 AI 的输入。2026-09-17 实测：内核有 25 个技能、
-6 个端，而 `SKILLS.md` 写「24 个技能…五端」、`USAGE.md` 写「分发到四端」、
-`PLATFORMS.md` 的落点表**根本没有 WorkBuddy AI 这一行**。于是没有任何 AI 会想到
-`~/.workbuddy-ai/skills` 也需要分发——那一端的 25 个技能一个都没到，而
+**为什么需要它**：文档里的数字是 AI 的输入。2026-09-17 实测：端点和技能数量曾经漂移，
+入口文档没有写清 `~/.workbuddy-ai/skills` 的独立落点，导致那一端的技能没有被正确分发，
 `aisk doctor` 照样报绿（它不看这个目录）。**数字过期不会报错，只会让下一个 AI
 照错的办事。**
 
@@ -102,17 +100,17 @@ FACTS = {
 # **只放「内核技能数/端数」这类纯仓库事实。** 各端受管技能数刻意不进注册表：
 # 那是分发后的现场状态（取决于最近一次 `aisk link` 跑没跑），不是仓库事实。
 # 2026-09-17 曾把它绑到 skill_count，结果加一个技能、还没跑 link 时 6 行全红——
-# 假红和假绿一样坏，所以那 6 条断言已删，USAGE.md 也不再写这个数。
+# 假红和假绿一样坏，所以断言只绑定公共入口的内核事实，不绑定端上现场数量。
 CLAIMS = [
-    ("SKILLS.md", "开头：内核技能数", rf"^({NUM}) 个技能，分发到", "skill_count"),
-    ("SKILLS.md", "开头：分发端数", rf"分发到 ({NUM}) 个端", "endpoint_count"),
-    ("SKILLS.md", "开头：Claude 端改名数", rf"端上改名.*?({NUM}) 个技能改了名", "claude_rename_count"),
-    ("USAGE.md", "§5：`aisk link` 默认端数", rf"分发到默认 ({NUM}) 个端", "default_endpoint_count"),
+    ("README.md", "开头：内核技能数", rf"^({NUM}) 个技能，分发到", "skill_count"),
+    ("README.md", "开头：分发端数", rf"分发到 ({NUM}) 个端", "endpoint_count"),
+    ("README.md", "开头：Claude 端改名数", rf"端上改名.*?({NUM}) 个技能改了名", "claude_rename_count"),
+    ("docs/AI-ONBOARDING.md", "`aisk link` 默认端数", rf"分发到默认 ({NUM}) 个端", "default_endpoint_count"),
 ]
 
 # 端名覆盖：TARGETS 里每个端都必须在这些文档里被点名。
 # 这是 2026-09-17 那次事故的直接防线——`workbuddy-ai` 当时在文档里根本不存在。
-ENDPOINT_DOCS = ["SKILLS.md", "USAGE.md"]
+ENDPOINT_DOCS = ["README.md", "docs/ADAPTERS.md"]
 
 
 # ------------------------------------------------------------------ CI 反事实断言
@@ -174,7 +172,9 @@ def check_ci_absence(root=None, workflows=None):
 
 # ------------------------------------------------------------------ 检查
 def load(name):
-    path = KERNEL / name
+    path = KERNEL.parent / name
+    if not path.is_file():
+        path = KERNEL / name
     if not path.is_file():
         return None
     return path.read_text(encoding="utf-8")

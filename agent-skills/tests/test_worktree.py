@@ -447,6 +447,14 @@ class LifecycleRegression(Sandbox):
 
 
 class SafetyRegression(Sandbox):
+    def test_branch_delivery_policy_allows_personal_and_protects_dev(self):
+        self.assertFalse(integrate.push_requires_confirmation(self.cfg, "be", "fxh"))
+        self.assertFalse(integrate.push_requires_confirmation(self.cfg, "be", "fxh-dev"))
+        self.assertTrue(integrate.push_requires_confirmation(self.cfg, "be", "dev"))
+        self.assertTrue(integrate.push_requires_confirmation(self.cfg, "be", "main"))
+        self.cfg.raw["merge_policy"] = {"confirm_personal_push": True}
+        self.assertTrue(integrate.push_requires_confirmation(self.cfg, "be", "fxh-dev"))
+
     def test_restore_recovers_abandoned_untracked_files(self):
         t = self.new()
         wt = Path(t["repos"]["be"]["path"])
@@ -590,8 +598,10 @@ class SafetyRegression(Sandbox):
         self.run_cmd(f"land {t['id']}")
         tip = git.sha(self.repo, "fxh")
         (self.repo / "file.txt").write_text("fxh 主工作区仍有用户未提交改动\n")
-        with patch.object(registry, "confirm_human", return_value=True):
+        with patch.object(registry, "confirm_human", return_value=True) as confirm:
             self.assertEqual(self.run_cmd("promote --repos be"), 0)
+        # fxh-dev 是个人推送面，默认放行；只有最终写入 dev 才弹一次确认框。
+        self.assertEqual(confirm.call_count, 1)
         self.assertTrue(git.dirty(self.repo), "promote 不得吞掉 fxh 主工作区的用户改动")
         self.assertEqual(git.sha(remote, "dev"), tip)
         self.assertEqual(self.reg.load(t["id"])["state"], "promoted")
@@ -967,7 +977,8 @@ class GuardsAndHooks(Sandbox):
                 self.assertEqual(confirm.call_args.args[1], "确认推送")
 
     def test_workbuddy_outside_private_push_and_read_only_commands_do_not_prompt(self):
-        payload = self.outside_payload()
+        # 个人集成分支（fxh/fxh-dev）是日常开发闭环；是否公开远端不改变放行策略。
+        payload = self.outside_payload("git push origin fxh-dev")
         with patch.object(guards, "outside_origin_url", return_value="file:///tmp/demo.git"), \
                 patch.object(guards.registry, "confirm_human") as confirm:
             self.assertIsNone(guards.evaluate(payload, "workbuddy"))
@@ -977,6 +988,30 @@ class GuardsAndHooks(Sandbox):
         # 其它端的任务外行为保持原样：这次 WorkBuddy 闸门不能改变 Codex。
         with patch.object(guards.registry, "confirm_human") as confirm:
             self.assertIsNone(guards.evaluate(payload, "codex"))
+        confirm.assert_not_called()
+
+    def test_protected_push_requires_confirmation_for_every_supported_tool(self):
+        payload = self.outside_payload("git push origin dev")
+        for tool in ("codex", "claude", "antigravity", "workbuddy", "workbuddy-ai", "cursor"):
+            with self.subTest(tool=tool), patch.object(guards.registry, "confirm_human", return_value=False) as confirm:
+                reason = guards.evaluate(payload, tool)
+            self.assertIn("未获操作者确认", reason)
+            confirm.assert_called_once()
+            self.assertEqual(confirm.call_args.kwargs["tool"], tool)
+            self.assertEqual(confirm.call_args.kwargs["action"], "git推送")
+            self.assertEqual(confirm.call_args.args[1], "确认推送")
+
+    def test_merge_protected_branch_requires_tool_named_confirmation(self):
+        payload = self.outside_payload("git merge dev")
+        with patch.object(guards.registry, "confirm_human", return_value=False) as confirm:
+            reason = guards.evaluate(payload, "claude")
+        self.assertIn("未获操作者确认", reason)
+        self.assertEqual(confirm.call_args.kwargs["tool"], "claude")
+        self.assertEqual(confirm.call_args.kwargs["action"], "git合并")
+        self.assertEqual(confirm.call_args.args[1], "确认合并")
+
+        with patch.object(guards.registry, "confirm_human") as confirm:
+            self.assertIsNone(guards.evaluate(self.outside_payload("git merge feature/demo"), "claude"))
         confirm.assert_not_called()
 
     def test_workbuddy_outside_custom_forbidden_command_prompts(self):

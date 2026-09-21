@@ -6,7 +6,8 @@
 2. `claim`：以工具名和会话号原子认领。
 3. 隔离工作区：一个任务、一个分支、一个变更责任人。
 4. `note`：记录完成项、下一步和阻塞原因。
-5. `check → ready → land → promote`：每个仓库独立门禁，合并和推送由带工具归属的弹窗确认。
+5. `check → ready → land → promote`：每个仓库独立门禁；个人 `fxh/fxh-dev` 推送默认放行，
+   合入或推送 `dev/main/master` 由带工具归属的弹窗确认。
 6. `events.jsonl` 和 `dialog_audit.jsonl` 只记录元数据，不记录业务内容和凭据。
 
 ### fxh 脏工作区与任务 worktree 的边界
@@ -22,7 +23,8 @@ aisk task ready Txxx
 ```
 
 上述提交命令只作用于任务 worktree，不检查、暂存、提交或清理 `fxh`，也不推送公网。任务
-分支的远端发布由中央交换流程完成，并且必须弹出标题包含 `git推送-<工具>` 的确认框。
+个人集成分支的远端发布可由日常开发直接完成；受保护分支的远端发布必须弹出标题包含
+`git推送-<工具>` 的确认框。`git merge dev` 必须弹出 `git合并-<工具>` 确认框。
 
 只有真正要把提交写入 `fxh` 文件树的 `land` 才要求对应 `fxh` 工作区干净；已经 land 后的
 `promote` 只读取 `fxh` 提交引用、使用独立门禁/主干锚点，因此允许 `fxh` 保留用户未提交
@@ -30,7 +32,7 @@ aisk task ready Txxx
 
 ### Windows 中央交换
 
-Windows 端不能直接 `git push`，也不能依赖无 TTY 的终端输入。`aisk task ready` 会对
+Windows 任务目录内不能直接 `git push`，也不能依赖无 TTY 的终端输入。`aisk task ready` 会对
 配置的本地/UNC `hub` 做预检，弹出 WinForms 原生确认框，标题格式为
 `git推送-<工具> | <任务号> | <仓库>`；确认后只做非强制推送，并用 `ls-remote` 回读提交号。
 拒绝、超时、远端分叉或回读不一致都 fail-closed，且写入 `.partial.json` 供重试，不会

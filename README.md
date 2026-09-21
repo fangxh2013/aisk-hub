@@ -1,6 +1,12 @@
 # aisk-hub
 
-面向 Codex、Claude、Antigravity、WorkBuddy 的本地 AI 技能协同内核。
+面向 Codex、Claude、Antigravity、WorkBuddy、WorkBuddy AI 和 Cursor 的本地 AI 技能协同内核。
+
+## 内核事实（由文档漂移门禁校验）
+
+9 个技能，分发到 6 个端；端上改名 5 个技能改了名。默认 `aisk link` 分发到默认 5 个端，
+Cursor 由用户按需启用。工具标识为 `codex`、`claude`、`antigravity`、`workbuddy`、
+`workbuddy-ai`、`cursor`。技能数、端数和改名数来自仓库代码，变化时必须同步本文和门禁。
 
 公共仓只提供通用内核、契约、适配器和脱敏测试。私有业务代码、真实拓扑与端口、配置正文、
 凭据、会话内容、企业知识和任务在制品留在私有层；公共仓只保存字段形状、摘要和安全降级规则。
@@ -157,13 +163,20 @@ Codex、Claude、Antigravity、WorkBuddy 和 WorkBuddy AI 的共同操作契约�
 ```
 
 任务目录内只允许在任务分支提交；任务内禁止 AI 直接 push、fetch、pull 或改写 Git 配置。
-`land` 与 `promote` 根据 profile 的 `merge_policy.confirm_land` 决定是否弹出人工确认；建议
-团队默认保持 `true`。所有确认标题都使用 `动作-工具｜任务号`，例如
-`git推送-codex｜T001`、`git合并-claude｜T001`、`git推送-antigravity｜T001`。
+`land` 与 `promote` 的受保护写入必须经过人工确认。所有确认标题都使用
+`动作-工具｜任务号`（任务外再追加仓库名），例如 `git推送-codex｜T001`、
+`git合并-claude｜T001`、`git推送-antigravity｜T001`。
 
-WorkBuddy 在任务目录外执行面向公开远端的原始 `git push` 时，用户级 PreToolUse 守卫也会
-拦截并请求确认；拒绝、身份不明或守卫异常均 fail-closed。该用户级钩子只追加 aisk 自己的
-精确命令，不覆盖已有配置；可重复执行 `aisk permit workbuddy workbuddy-ai`。
+个人集成分支 `fxh` 及其个人推送面（常见为 `fxh-dev`）是日常开发闭环：commit 和 push
+默认放行，不因远端是 GitHub、内网或本地路径而误弹窗。合入 `dev`、推送 `dev`，以及
+`main/master` 或 profile 声明的 trunk，始终进入带工具名的确认框；`git merge dev`
+同样需要 `git合并-<工具>` 确认。需要个人推送也确认时，可在 profile 设置
+`merge_policy.confirm_personal_push: true`。
+
+这是三层策略：本地宿主守卫负责识别命令并弹窗，`aisk task` 负责任务内隔离，远端
+branch protection 负责阻断临时 clone 或人工绕过本地钩子的直接写入。远端规则的配置和验收
+见 [`docs/REMOTE-BRANCH-PROTECTION.md`](docs/REMOTE-BRANCH-PROTECTION.md)。身份不明、
+确认取消、超时或守卫异常均 fail-closed；个人分支放行不等于允许绕过远端受保护分支。
 
 ## 隐私与发布检查
 

@@ -24,6 +24,7 @@ class Reject(WtError):
 
 
 MANUAL_ONLY_BRANCHES = {"main", "master"}
+DEFAULT_PROTECTED_PUSH_BRANCHES = {"dev", "main", "master"}
 
 
 def merge_policy(cfg: WtConfig):
@@ -33,6 +34,27 @@ def merge_policy(cfg: WtConfig):
 
 def manual_merge_required(cfg: WtConfig):
     return bool(merge_policy(cfg).get("confirm_land", False))
+
+
+def push_requires_confirmation(cfg: WtConfig, alias, branch):
+    """判断 promote 写入的远端分支是否需要人工确认。
+
+    个人集成面（新华为 ``fxh``）及其个人推送分支（通常为 ``fxh-dev``）是
+    日常开发闭环，默认允许提交/推送；``dev``、``main``、``master`` 以及仓库
+    trunk 始终需要确认。历史 profile 可能把 ``fxh`` 误列进 protected，不能
+    让那份旧配置重新封锁个人分支；如确实需要确认个人推送，可显式设置
+    ``merge_policy.confirm_personal_push: true``。
+    """
+    policy = merge_policy(cfg)
+    if bool(policy.get("confirm_personal_push", False)):
+        return True
+    rc = cfg.repo(alias)
+    branch = str(branch or "")
+    personal = {str(cfg.integration), str(rc.push_branch)} - {"", str(rc.trunk)}
+    if branch in personal:
+        return False
+    protected = set(DEFAULT_PROTECTED_PUSH_BRANCHES) | {str(b) for b in cfg.protected}
+    return branch == str(rc.trunk) or branch in protected
 
 
 def main_operations_forbidden(cfg: WtConfig):
@@ -534,13 +556,26 @@ def promote_one(cfg: WtConfig, reg: Registry, alias, rc, dry, args=None):
         print(text)
         if dry:
             say("info", "（dry-run 不推送）")
-        elif registry.confirm_human(text, _push_expect(args), context=action_context(
-                args, "git推送", required_promotion_task_id(reg, args, alias, repo, head), text,
-                repository=_repository_label_for_workbuddy(args, repo))):
-            git.run(["push", "origin", f"{head}:refs/heads/{push_branch}"], cwd=repo)
-            say("ok", f"已推送 origin/{push_branch}")
         else:
-            raise Reject("未确认推送个人远程分支，停止")
+            requires_confirmation = push_requires_confirmation(cfg, alias, push_branch)
+            confirmed = (not requires_confirmation
+                         or registry.confirm_human(
+                             text,
+                             _push_expect(args),
+                             context=action_context(
+                                 args,
+                                 "git推送",
+                                 required_promotion_task_id(reg, args, alias, repo, head),
+                                 text,
+                                 repository=_repository_label_for_workbuddy(args, repo),
+                             ),
+                         ))
+            if confirmed:
+                git.run(["push", "origin", f"{head}:refs/heads/{push_branch}"], cwd=repo)
+                suffix = "（个人分支默认放行）" if not requires_confirmation else ""
+                say("ok", f"已推送 origin/{push_branch}{suffix}")
+            else:
+                raise Reject(f"未确认推送 {push_branch}，停止")
     else:
         say("info", f"origin/{push_branch} 已是最新")
 

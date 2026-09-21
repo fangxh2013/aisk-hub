@@ -1,5 +1,8 @@
 # AI Onboarding Contract
 
+`aisk link` 默认分发到默认 5 个端；完整端清单和 Cursor 的按需启用方式见
+[`docs/ADAPTERS.md`](ADAPTERS.md)。
+
 本文是把 `aisk-hub` GitHub 地址交给 Codex、Claude、Antigravity、WorkBuddy 或 WorkBuddy AI
 后，AI 应遵守的公共入口契约。它不包含任何企业路径、服务器地址、凭据或业务知识。
 
@@ -84,7 +87,8 @@ PYTHONPATH=agent-skills python3 tools/verify_spec.py \
 ```
 
 任务目录内禁止 AI 直接 `git push`、`git fetch`、`git pull`、改写 Git 配置或直接操作主干。
-交付使用 `check → ready → land → promote`。真正的合并/推送前必须由操作者确认。
+交付使用 `check → ready → land → promote`。个人 `fxh/fxh-dev` 的日常 commit/push 默认放行；
+合入或推送 `dev/main/master` 前必须由操作者确认，`git merge dev` 也必须确认。
 
 确认标题必须包含动作、工具和任务号，例如：
 
@@ -96,6 +100,10 @@ git推送-workbuddy-ai｜T001
 ```
 
 身份不明、会话号缺失、确认超时或守卫异常时 fail-closed。
+
+本地钩子不是远端权限。部署到团队仓库后，必须按
+[`docs/REMOTE-BRANCH-PROTECTION.md`](REMOTE-BRANCH-PROTECTION.md) 配置服务端保护，
+否则临时 clone 可以绕过本地弹窗。
 
 ## 6. 给 AI 的可复制启动提示
 
