@@ -23,6 +23,19 @@ def _same_path(a, b):
     return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
 
 
+def quarantine_stale_worktree(path):
+    """隔离残留目录，保留现场后再让任务引擎重建有效 worktree。"""
+    path = Path(path)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    candidate = path.with_name(f"{path.name}.stale-{stamp}")
+    suffix = 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.stale-{stamp}-{suffix}")
+        suffix += 1
+    path.rename(candidate)
+    return candidate
+
+
 # ------------------------------------------------------------------ init
 def init_problems(cfg: WtConfig, reg: Registry):
     problems = []
@@ -92,6 +105,12 @@ def cmd_init(cfg, reg, args):
                 git.worktree_add_unique(repo, ap, f"{ANCHOR_PREFIX}{alias}-{b}", b, branch=b, reason="aisk task anchor")
             say("ok", f"锚点 {b} → {ap}")
         gate = cfg.anchor_path(alias, "gate")
+        if gate.exists() and not git.backlink_ok(gate)[0]:
+            if apply:
+                stale = quarantine_stale_worktree(gate)
+                say("warn", f"门禁区回链失效，已保留旧目录 {stale}")
+            else:
+                say("warn", f"门禁区 {gate} 存在但回链失效；apply 时会隔离保留并重建")
         if not gate.exists():
             if apply:
                 git.worktree_add_unique(repo, gate, f"{ANCHOR_PREFIX}{alias}-gate", cfg.integration, detach=True,

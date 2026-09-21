@@ -533,6 +533,16 @@ class SafetyRegression(Sandbox):
         self.assertEqual((self.repo / ".git/config").read_bytes(), before)
         self.assertFalse(self.cfg.hub.exists())
 
+    def test_stale_worktree_quarantine_preserves_directory(self):
+        stale = self.root / "gate"
+        stale.mkdir()
+        (stale / ".git").write_text("gitdir: missing-admin\n")
+        (stale / "unknown.txt").write_text("preserve\n")
+        kept = doctor.quarantine_stale_worktree(stale)
+        self.assertFalse(stale.exists())
+        self.assertEqual((kept / "unknown.txt").read_text(), "preserve\n")
+        self.assertTrue(kept.name.startswith("gate.stale-"))
+
     def test_missing_salvage_source_rejected(self):
         with self.assertRaises(WtError):
             tasks.salvage_dir(self.cfg, self.reg, self.root / "absent", "be", "fxh", "missing")
