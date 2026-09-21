@@ -9,6 +9,33 @@
 5. `check → ready → land → promote`：每个仓库独立门禁，合并和推送由带工具归属的弹窗确认。
 6. `events.jsonl` 和 `dialog_audit.jsonl` 只记录元数据，不记录业务内容和凭据。
 
+### fxh 脏工作区与任务 worktree 的边界
+
+任务分支是独立的 Git worktree。`fxh` 主工作区存在未提交改动时，不应阻断任务分支的本地
+提交、构建检查、`ready` 或 Windows → hub 的中央交换发布。AI 在任务目录内使用：
+
+```text
+aisk task commit Txxx --repos be --path src/... -m "feat: ..."
+aisk task commit Txxx --all -m "fix: ..."
+aisk task check Txxx
+aisk task ready Txxx
+```
+
+上述提交命令只作用于任务 worktree，不检查、暂存、提交或清理 `fxh`，也不推送公网。任务
+分支的远端发布由中央交换流程完成，并且必须弹出标题包含 `git推送-<工具>` 的确认框。
+
+只有真正要把提交写入 `fxh` 文件树的 `land` 才要求对应 `fxh` 工作区干净；已经 land 后的
+`promote` 只读取 `fxh` 提交引用、使用独立门禁/主干锚点，因此允许 `fxh` 保留用户未提交
+改动，但绝不替用户覆盖这些改动。不同仓库使用 `--repos` 独立交付，互不连坐。
+
+### Windows 中央交换
+
+Windows 端不能直接 `git push`，也不能依赖无 TTY 的终端输入。`aisk task ready` 会对
+配置的本地/UNC `hub` 做预检，弹出 WinForms 原生确认框，标题格式为
+`git推送-<工具> | <任务号> | <仓库>`；确认后只做非强制推送，并用 `ls-remote` 回读提交号。
+拒绝、超时、远端分叉或回读不一致都 fail-closed，且写入 `.partial.json` 供重试，不会
+覆盖同名分支。
+
 如需接入外部编排器，可在 adapter 中实现 MCP、文件队列或 CI 事件桥；桥接层只能提交任务事件，不能绕过内核状态机。
 
 ## 本地状态存储边界

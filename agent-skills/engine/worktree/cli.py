@@ -21,7 +21,7 @@ USAGE = """aisk task：多 AI 并行任务工作区。说明见 agent-skills 的
   aisk task new <英文短语> --title <中文标题> --repos backend,frontend --goal … --accept …
   aisk task adopt-branch <分支> --repo backend <英文短语> --title …（把主工作区遗留分支接成任务）
 交付：
-  aisk task check <任务>  →  填 HANDOFF.md  →  aisk task ready <任务> [--repos …]  →  aisk task land <任务> [--repos …] [--dry-run]
+  aisk task commit <任务> -m "type: 说明" [--path 路径]  →  aisk task check <任务>  →  填 HANDOFF.md  →  aisk task ready <任务> [--repos …]  →  aisk task land <任务> [--repos …] [--dry-run]
   （前端、后端、文档各自 ready/land/promote：一个仓库被拦不影响其他仓库）
 操作者：
   aisk task promote [--repos backend,frontend] [--dry-run]    aisk task verify <任务> --pass|--fail    aisk task archive <任务>
@@ -29,7 +29,7 @@ USAGE = """aisk task：多 AI 并行任务工作区。说明见 agent-skills 的
 任务写法：T042、T042-coupon-claim-lock，或旧槽位号 me/0915-xxx
 """
 
-TASK_LOCKED = {"check", "ready", "restack", "pause", "archive", "land", "merge-commit", "revert", "verify"}
+TASK_LOCKED = {"check", "commit", "ready", "restack", "pause", "archive", "land", "merge-commit", "revert", "verify"}
 
 
 def add_tool(p):
@@ -112,6 +112,11 @@ def build_parser():
     cmd("env", tasks.cmd_env, "打印任务环境变量文件路径", task=True)
     cmd("overlap", tasks.cmd_overlap, "进行中任务的改动重叠预警")
     cmd("check", tasks.cmd_check, "自检构建", task=True, tool=True)
+    p = cmd("commit", tasks.cmd_commit, "只提交当前任务分支，不检查或修改 fxh，不推送远端", task=True, tool=True)
+    p.add_argument("--path", dest="paths", action="append", default=[], help="任务仓库内的相对路径（可重复）；不写时必须使用 --all")
+    p.add_argument("--repos", help="只提交这些仓库（逗号分隔）；省略=全部")
+    p.add_argument("--all", action="store_true", help="提交当前任务仓库的全部改动")
+    p.add_argument("-m", "--message", required=True, help="符合仓库规则的提交说明")
     p = cmd("ready", tasks.cmd_ready, "交付就绪（登记 ready 提交；各仓库各自判定）", task=True, tool=True)
     p.add_argument("--repos", help="只交付这些仓库（逗号分隔）；省略=全部，没过的仓库不拦其他仓库")
     cmd("restack", tasks.cmd_restack, "rebase 到最新基线", task=True, tool=True)

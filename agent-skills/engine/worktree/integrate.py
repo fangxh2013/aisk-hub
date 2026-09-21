@@ -450,7 +450,9 @@ def cmd_promote(cfg, reg, args):
 
 
 def promote_one(cfg: WtConfig, reg: Registry, alias, rc, dry, args=None):
-    # 只查这个仓库真正会写的分支：push-only（如文档仓库只推 fxh）不碰主干，主干叫 master 也不该被拦
+    # 只查这个仓库真正会写的分支：push-only（如文档仓库只推 fxh）不碰主干，主干叫 master 也不该被拦。
+    # promote 只读取 cfg.integration 的提交引用并写独立 anchor/远端；fxh 主工作区
+    # 可以保留用户未提交改动。真正会改写 fxh 文件的 land 仍在提交前做清洁检查。
     reject_main_target(cfg, cfg.integration, rc.push_branch, *([rc.trunk] if rc.promote == "ff-trunk" else []))
     repo = rc.path
     r = git.run(["fetch", "origin", "--prune"], cwd=repo, check=False)
@@ -458,8 +460,6 @@ def promote_one(cfg: WtConfig, reg: Registry, alias, rc, dry, args=None):
         raise Reject(f"fetch origin 失败：{r.stderr.strip()[-300:]}")
     if git.current_branch(repo) != cfg.integration:
         raise Reject(f"主工作区不在 {cfg.integration}")
-    if git.dirty(repo):
-        raise Reject("主工作区有未提交改动")
     found = audit_branch(cfg, reg, alias, repo, cfg.integration, strict=False)
     for b in list(rc.anchors) + list(rc.audited):
         found += audit_branch(cfg, reg, alias, repo, b, strict=True)
@@ -494,7 +494,7 @@ def promote_one(cfg: WtConfig, reg: Registry, alias, rc, dry, args=None):
                 if not ok:
                     print(gates.tail(log))
                     raise Reject(f"同步 origin/{trunk} 后门禁失败——{summary}（{log}）")
-                if git.sha(repo, cfg.integration) != head or git.dirty(repo):
+                if git.sha(repo, cfg.integration) != head:
                     raise Reject(f"门禁期间 {cfg.integration} 有变化，请重新 promote")
                 if manual_merge_required(cfg):
                     prompt = sync_prompt(alias, cfg.integration, trunk, head, cand, changed, summary)
@@ -513,8 +513,8 @@ def promote_one(cfg: WtConfig, reg: Registry, alias, rc, dry, args=None):
         ok, summary = gates.run_gate(cfg, alias, gate, git.diff_names(repo, comparison, head), log, clean=True)
         if not ok:
             raise Reject(f"推送前门禁失败：{summary}（{log}）")
-        if git.current_branch(repo) != cfg.integration or git.sha(repo, "HEAD") != head or git.dirty(repo):
-            raise Reject("推送前集成区发生变化，请重新验证")
+        if git.sha(repo, cfg.integration) != head:
+            raise Reject("推送前集成分支引用发生变化，请重新验证")
 
     push_branch = rc.push_branch
     remote_push = git.sha(repo, f"origin/{push_branch}")

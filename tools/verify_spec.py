@@ -6,6 +6,7 @@ import copy
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -222,6 +223,8 @@ def validate_adapter_contract(data):
     protocol = data.get("dialog_protocol", {})
     if protocol.get("title_format") != "{action}-{tool}｜{task_id}":
         raise contracts.ContractError("公共弹窗标题必须为动作-工具｜任务号")
+    if protocol.get("platform_backends") != {"macos": "osascript", "windows": "powershell_winforms"}:
+        raise contracts.ContractError("公共弹窗必须声明 macOS osascript 与 Windows PowerShell WinForms 后端")
     return f"{len(actors)} 个 actor；四工具安装目标、会话、标题和降级策略通过"
 
 
@@ -458,12 +461,37 @@ def rollback_probe():
     return "强制异常后的 SQLite ROLLBACK 保持基线一致"
 
 
-def run_runtime_probes(root):
+def runtime_probe_env(args):
+    """让探针与实际 aisk 启动器使用同一份 private/profile 解析结果。
+
+    verifier 在独立 task worktree 中运行时，wrapper 的相邻目录不一定有
+    aisk-private；显式传入 private manifest 就是无歧义的配置来源，不能再让
+    探针回落到一个不存在的 profiles 目录。
+    """
+    env = os.environ.copy()
+    if args.private_manifest:
+        manifest = Path(args.private_manifest).expanduser().resolve()
+        private_root = manifest.parent
+        if manifest.name != "OVERLAY_MANIFEST.yaml":
+            private_root = manifest.parent
+        profile_dir = private_root / "profiles"
+        if profile_dir.is_dir():
+            env["AISK_PRIVATE_ROOT"] = str(private_root)
+            env["AISKHUB_PRIVATE_ROOT"] = str(private_root)
+            env["AISK_PROFILE_DIR"] = str(profile_dir)
+            env["AISKHUB_PROFILE_DIR"] = str(profile_dir)
+    env.setdefault("AISKHUB_RUNTIME_ROOT", str(Path.home() / ".aisk-runtime" / "hub"))
+    env.setdefault("AISK_HOME", str(Path.home() / ".aisk"))
+    return env
+
+
+def run_runtime_probes(root, env=None):
     """真实客户端/外部系统运行时探针。"""
     probes = []
 
     def probe_link():
-        res = subprocess.run([str(root / "bin" / "aisk"), "link", "--dry-run"], cwd=root, capture_output=True, text=True)
+        res = subprocess.run([str(root / "bin" / "aisk"), "link", "--dry-run"], cwd=root, env=env,
+                             capture_output=True, text=True)
         if res.returncode != 0:
             raise RuntimeError(f"aisk link --dry-run 失败: {res.stderr}")
         for tool in ("claude", "codex", "antigravity", "workbuddy", "workbuddy-ai"):
@@ -476,7 +504,7 @@ def run_runtime_probes(root):
         # task 子命令必须显式绑定 aisk-hub profile；--brief 避免看板 Markdown
         # 刷新时对主工作区异常的兼容性降级吞掉 stdout，同时仍验证 SQLite 登记簿可读。
         res = subprocess.run([str(root / "bin" / "aisk"), "--profile", "aisk-hub", "task", "status", "--brief"],
-                             cwd=root, capture_output=True, text=True)
+                             cwd=root, env=env, capture_output=True, text=True)
         if res.returncode != 0:
             raise RuntimeError(f"aisk task status 失败: {res.stderr}")
         if "T003" not in res.stdout:
@@ -485,7 +513,8 @@ def run_runtime_probes(root):
     probes.append(run_check("runtime_task_board_probe", probe_board, command="aisk --profile aisk-hub task status --brief"))
 
     def probe_fact():
-        res = subprocess.run([str(root / "bin" / "aisk"), "--profile", "xinhua", "fact", "--env", "dev", "service", "goods"], cwd=root, capture_output=True, text=True)
+        res = subprocess.run([str(root / "bin" / "aisk"), "--profile", "xinhua", "fact", "--env", "dev", "service", "goods"],
+                             cwd=root, env=env, capture_output=True, text=True)
         if res.returncode != 0:
             raise RuntimeError(f"aisk fact 失败: {res.stderr}")
         if "service=goods" not in res.stdout or "nacos_dataid=" not in res.stdout:
@@ -614,7 +643,7 @@ def main(argv=None):
         "details": "未运行真实客户端联调探针；本次仅完成离线契约与文件验证。",
     }
     if args.probe_runtime:
-        runtime_probes = run_runtime_probes(root)
+        runtime_probes = run_runtime_probes(root, runtime_probe_env(args))
         runtime_passed = all(p["passed"] for p in runtime_probes)
         real_runtime.update({
             "status": "runtime-certified" if runtime_passed else "runtime-failed",
@@ -624,15 +653,21 @@ def main(argv=None):
             "probes": runtime_probes,
         })
 
+    # 一旦显式要求真实运行探针，运行时失败就不能再把离线分数冒充最终分数。
+    final_score = min(total, real_runtime["score"]) if args.probe_runtime else total
+    offline_certified = bool(total >= float(matrix.get("pass_threshold", 99.9)) and all_passed)
+    final_certified = bool(offline_certified and (real_file["certified"] if args.require_real else True)
+                           and (real_runtime["certified"] if args.probe_runtime else True))
+
     summary = {
         "evaluation_title": "aisk 99.9+ executable contract verification",
         "evaluated_at": now_iso(),
         "git_commit": git(root, "rev-parse", "HEAD"),
         "worktree_dirty": bool(git(root, "status", "--porcelain")),
         "offline_mode": True,
-        "final_score": round(total, 2),
+        "final_score": round(final_score, 2),
         "offline_contract_score": round(total, 2),
-        "offline_contract_certified": bool(total >= float(matrix.get("pass_threshold", 99.9)) and all_passed),
+        "offline_contract_certified": offline_certified,
         "real_file_score": real_file["score"],
         "real_runtime_score": real_runtime["score"],
         "real_runtime_certified": real_runtime["certified"],
@@ -640,11 +675,11 @@ def main(argv=None):
         "real_file_validation": real_file,
         "real_runtime_validation": real_runtime,
         "all_reports_passed": all_passed,
-        "is_99_plus_certified": bool(total >= float(matrix.get("pass_threshold", 99.9)) and all_passed),
+        "is_99_plus_certified": final_certified,
         "certification_note": (
-            "is_99_plus_certified: offline_contract 与 real_runtime 均达到 100.0 分并通过真实联调验证。"
-            if real_runtime["certified"] else
-            "is_99_plus_certified 仅表示 offline_contract；real_runtime_score=null 表示未进行真实客户端联调。"
+            "离线契约、真实文件与真实运行时均通过 99.9+ 门禁。"
+            if final_certified else
+            "未达到完整 99.9+：offline_contract、真实文件和真实运行时分数分别查看对应字段。"
         ),
         "reports": reports,
     }

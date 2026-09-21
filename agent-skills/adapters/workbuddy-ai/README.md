@@ -125,8 +125,9 @@ codebuddy mcp add aisk --scope user \
 - **别名归一**：`workbuddy_ai` / `workbuddyai` / `WORKBUDDY-AI` 都会归一成 `workbuddy-ai`。
 - **fail-closed**：工具身份识别不出来时**不生成弹窗**，直接返回拒绝
   （`registry.py` 的 `except ActionContextError: return False`）。
-- **Windows 无原生弹窗**：`IS_WIN` 时跳过 osascript，落到 tty 判断；非 tty 记为
-  `denied / no-interactive-tty`。即 Windows 上高风险动作默认被拒，这是**刻意的失败关闭**。
+- **Windows 原生弹窗**：`IS_WIN` 时使用当前交互桌面的 PowerShell WinForms；标题仍包含
+  `动作-工具`，例如 `git推送-workbuddy-ai | T009 | backend`。确认、取消、超时和启动失败
+  均写入脱敏审计并 fail-closed；没有交互桌面时才回落 TTY，非 TTY 记为拒绝。
 - **`aisk permit` 覆盖两端并真实写入（2026-09-19 重写，此前是 `unsupported`）**：
   `engine/permissions.py` 的 `HANDLERS` 含 `workbuddy` 与 `workbuddy-ai`，两端都落到
   `apply_workbuddy()`，写入 **user 作用域** `~/.codebuddy/settings.json` 的

@@ -216,6 +216,9 @@ actors:
 dialog_protocol:
   title_format: '{action}-{tool}｜{task_id}'
   fallback_no_model: '{action}-{tool}｜{task_id}'
+  platform_backends:
+    macos: osascript
+    windows: powershell_winforms
   required_fields:
   - action
   - tool

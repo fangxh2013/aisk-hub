@@ -30,7 +30,7 @@
 
 ## 交付
 
-1. 只提交到上表"你的分支"；小步提交；交接前每个仓库工作区都要干净。
+1. 只提交到上表"你的分支"；优先使用 `{{cli}} commit {{task_id}} --path <相对路径> -m "type: 说明"` 或 `--all` 小步提交。该命令只作用于任务 worktree，不检查/修改 `{{sync_ref}}` 主工作区；交接前每个仓库工作区都要干净。
 2. 提交说明一行，格式 {{message_hint}}，≤{{max_chars}} 字，不得出现 AI 工具或模型名称，不加 Co-authored-by。
 3. 需要最新代码：在仓库目录执行 `git rebase {{sync_ref}}`。冲突必须逐文件查看共同祖先、目标侧、任务侧的提交时间与业务意图后逐块合并；禁止 `-X ours/theirs`、`git checkout --ours/--theirs .` 或整文件覆盖。{{sync_hint}}
 4. 自检 `{{cli}} check {{task_id}}` → 填完 `HANDOFF.md` 每一节 → `{{cli}} ready {{task_id}}`。

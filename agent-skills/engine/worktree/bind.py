@@ -22,6 +22,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -80,7 +81,10 @@ def launcher_argv():
 def launcher_cmd(*args):
     argv = launcher_argv() + list(args)
     if IS_WIN:  # pragma: no cover
-        return " ".join(f'"{a}"' if " " in a else a for a in argv)
+        # Windows 任务目录常含空格、括号或中文；手写只包空格的规则会在 cmd
+        # 和 PowerShell 中产生不同解析结果。list2cmdline 是 Python/POSIX
+        # 子进程约定的稳定 argv → Windows 命令行编码。
+        return subprocess.list2cmdline(argv)
     return " ".join(shlex.quote(a) for a in argv)
 
 
@@ -153,9 +157,27 @@ def write_env(cfg: WtConfig, task, java_home=""):
         "AISK_PORT_SERVICES": f"{ports['services_from']}-{ports['services_to']}",
     }
     # 任务直接在隔离目录里启动时，也必须沿用当前工程的内核、私有 overlay、profile 和运行时，
-    # 不能因 cwd 变成 task worktree 就回落到用户旧的全局配置。
-    for key in ("AISK_HUB_ROOT", "AISK_ENGINE_ROOT", "AISK_PRIVATE_ROOT", "AISK_PROFILE_DIR", "AISKHUB_RUNTIME_ROOT"):
-        value = os.environ.get(key)
+    # 不能因 cwd 变成 task worktree 就回落到用户旧的全局配置。环境变量不完整正是 Windows
+    # 从 hub 重新加载任务时找不到 profile 的根因之一；这里写入稳定解析结果，而不是只复制
+    # 启动器恰好注入的变量。
+    profile_dir = os.environ.get("AISK_PROFILE_DIR") or os.environ.get("AISKHUB_PROFILE_DIR")
+    if not profile_dir and cfg.profile_path:
+        profile_dir = str(cfg.profile_path.parent)
+    private_root = os.environ.get("AISK_PRIVATE_ROOT") or os.environ.get("AISKHUB_PRIVATE_ROOT")
+    if not private_root and profile_dir and Path(profile_dir).name == "profiles":
+        private_root = str(Path(profile_dir).parent)
+    runtime_root = os.environ.get("AISKHUB_RUNTIME_ROOT") or str(profile_mod.runtime_root())
+    stable = {
+        "AISK_HUB_ROOT": str(KERNEL.parent),
+        "AISK_ENGINE_ROOT": str(KERNEL),
+        "AISK_HOME": os.environ.get("AISK_HOME") or str(profile_mod.runtime_root().parent / ".aisk"),
+        "AISK_PRIVATE_ROOT": private_root,
+        "AISKHUB_PRIVATE_ROOT": private_root,
+        "AISK_PROFILE_DIR": profile_dir,
+        "AISKHUB_PROFILE_DIR": profile_dir,
+        "AISKHUB_RUNTIME_ROOT": runtime_root,
+    }
+    for key, value in stable.items():
         if value:
             env[key] = value
     for key, value in cfg.task_env.items():

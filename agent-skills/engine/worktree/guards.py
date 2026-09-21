@@ -76,7 +76,7 @@ GIT_FORBIDDEN_ALWAYS = {
     "pack-refs": "任务内禁止 git pack-refs。",
 }
 TASK_OPERATOR_ONLY = {"promote", "init", "bind", "import-legacy", "legacy-shims"}
-TASK_MUTATING = {"check", "ready", "land", "pause", "archive", "restack", "merge-commit", "revert", "release",
+TASK_MUTATING = {"check", "commit", "ready", "land", "pause", "archive", "restack", "merge-commit", "revert", "release",
                  "harvest"}
 WRITE_PROGS = {"rm", "rmdir", "mv", "touch", "mkdir", "chmod", "chown", "truncate", "tee", "patch", "ln", "unzip", "tar",
                "dd", "shred", "del", "rd", "move", "copy", "install", "rsync", "cp", "ditto", "robocopy", "xcopy", "scp",

@@ -91,7 +91,15 @@ def _tm_exclude(paths):
         return
     for p in paths:
         if Path(p).exists():
-            subprocess.run(["/usr/bin/tmutil", "addexclusion", str(p)], capture_output=True)
+            try:
+                # tmutil 在受管控/未授权的 macOS 环境可能等待系统服务，不能让
+                # aisk task check 永久挂住并表现成“所有 worktree 都不能提交”。
+                subprocess.run(["/usr/bin/tmutil", "addexclusion", str(p)], capture_output=True, timeout=15)
+            except subprocess.TimeoutExpired:
+                # 排除备份失败不改变代码门禁结论；只让构建继续并把原因写入后续日志。
+                continue
+            except OSError:
+                continue
 
 
 LOCKFILES = (("pnpm-lock.yaml", "pnpm", ["install", "--frozen-lockfile"]),

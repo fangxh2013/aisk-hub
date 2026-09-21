@@ -16,9 +16,9 @@
 
 ---
 
-## 二、高危操作系统原生弹窗契约 (macOS AppleScript)
+## 二、高危操作系统原生弹窗契约
 
-凡涉及**合并主干（dev/master/main）、推送远端、落地代码（land/promote）、执行 DDL 迁移或生产发布等关键/高危操作**，必须通过系统原生弹窗（`/usr/bin/osascript`）向用户请求确认，严禁静默执行。
+凡涉及**合并主干（dev/master/main）、推送远端、落地代码（land/promote）、执行 DDL 迁移或生产发布等关键/高危操作**，必须通过当前操作系统的原生 UI 向用户请求确认，严禁静默执行。macOS 使用 `/usr/bin/osascript`；Windows 使用当前交互桌面的 PowerShell WinForms。无图形桌面或弹窗超时统一拒绝。
 
 ### 1. 标题标准协议
 **标题必须直接可见对应工具名称**，格式严格为：
@@ -31,7 +31,7 @@
 - `落地代码-workbuddy-ai｜T001`
 
 ### 2. 授权判定铁律
-只有捕获到 `button returned:<操作动作>` 且 `gave up:false` 时才判定为用户真实授权；返回取消或 600 秒超时必须立即终止操作，严格保持原状。
+macOS 只有捕获到 `button returned:<操作动作>` 且 `gave up:false` 时才判定为用户真实授权；Windows 只有 WinForms 的确认按钮返回成功才授权。返回取消、超时或 UI 启动失败必须立即终止操作，严格保持原状。
 
 ---
 

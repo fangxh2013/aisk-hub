@@ -79,3 +79,10 @@ Codex 默认通过已安装 CLI 获取这些能力，已有原生工具继续处
 各工具（Claude Code、Codex、Antigravity、WorkBuddy、WorkBuddy AI、Cursor）共用任务流程，
 能接钩子的端各自接入，Mac 与 Win11 使用各自本地工作区。新项目模板见 [示例档案](templates/worktree-profile.example.yaml)，
 设计、兼容迁移和验证范围见根目录 `docs/COORDINATION.md`。
+
+任务目录内的标准提交入口是 `aisk task commit <任务> --path <相对路径> -m "type: 说明"`
+或 `aisk task commit <任务> --all -m "type: 说明"`。它只提交当前任务分支，不读取或修改
+`fxh` 主工作区，也不执行公网 push；因此 `fxh` 有未提交改动时，其他任务仍可独立提交、
+check 和 ready。Windows ready 通过本地/UNC hub 中央交换，确认框标题包含
+`git推送-<工具>`，确认后非强制推送并回读校验；Mac 再执行 land/promote。只有实际修改
+`fxh` 文件树的 land 才要求该主工作区干净。
