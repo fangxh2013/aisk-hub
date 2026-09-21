@@ -15,9 +15,9 @@
 
 ---
 
-## 二、人工确认与系统原生弹窗规范（macOS AppleScript）
+## 二、人工确认与系统原生弹窗规范（macOS AppleScript / Windows WinForms）
 
-在 Antigravity 中，凡涉及**合并主干（dev/master/main）、推送远端、落地代码（land/promote）、执行 DDL/SQL 迁移或生产发布等关键/高危操作**，必须通过系统原生弹窗（`/usr/bin/osascript`）向用户请求确认，严禁静默执行或仅在聊天会话中假定已授权。
+在 Antigravity 中，凡涉及**合并主干（dev/master/main）、推送远端、落地代码（land/promote）、执行 DDL/SQL 迁移或生产发布等关键/高危操作**，必须通过当前操作系统的原生弹窗向用户请求确认：macOS 使用 `/usr/bin/osascript`，Windows 使用当前交互桌面的 PowerShell WinForms；严禁静默执行或仅在聊天会话中假定已授权。
 
 ### 1. 标题协议与调用范式
 - **标题标准**：`动作-antigravity｜<任务号>`（如 `落地代码-antigravity｜T001`）

@@ -333,8 +333,12 @@ def remove_tree(path):
 
 def confirm_human(prompt, expect, context=None, *, action=None, task_id="", session_id="", tool=None,
                   risk_level="HIGH", repository=""):
-    """人工确认：macOS 弹系统对话框（终端里的 AI 点不到），无图形会话时退回终端输入；Windows 终端输入。
-    没有任何环境变量开关——测试在进程内替换本函数。"""
+    """人工确认。
+
+    macOS 使用 AppleScript；Windows 使用当前交互桌面的 PowerShell WinForms。
+    两端都保留无图形会话时的 TTY 回退，并且所有失败都拒绝（fail closed）。
+    没有环境变量放行开关——测试在进程内替换本函数。
+    """
     if context is None:
         try:
             context = ActionContext.from_env(
@@ -361,6 +365,78 @@ def confirm_human(prompt, expect, context=None, *, action=None, task_id="", sess
                 return False
         except (OSError, subprocess.SubprocessError):
             pass
+
+    if IS_WIN:
+        # 不把提示词拼进 PowerShell 命令行：命令行转义在 cmd、PowerShell、Git Bash
+        # 三层之间并不等价。通过一次性子进程环境传值，脚本本身固定且不可注入。
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh.exe")
+        if powershell:
+            script = r'''
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$form = New-Object System.Windows.Forms.Form
+$form.Text = $env:AISKHUB_DIALOG_TITLE
+$form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$form.TopMost = $true
+$form.Width = 720
+$form.Height = 420
+$form.MinimizeBox = $false
+$form.MaximizeBox = $false
+$form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+$label = New-Object System.Windows.Forms.Label
+$label.Text = $env:AISKHUB_DIALOG_PROMPT
+$label.AutoSize = $false
+$label.Left = 18
+$label.Top = 18
+$label.Width = 668
+$label.Height = 290
+$label.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10)
+$label.Anchor = 'Top,Left,Right'
+$form.Controls.Add($label)
+$cancel = New-Object System.Windows.Forms.Button
+$cancel.Text = '取消'
+$cancel.Left = 470
+$cancel.Top = 320
+$cancel.Width = 100
+$cancel.Height = 36
+$cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+$form.Controls.Add($cancel)
+$accept = New-Object System.Windows.Forms.Button
+$accept.Text = $env:AISKHUB_DIALOG_EXPECT
+$accept.Left = 585
+$accept.Top = 320
+$accept.Width = 100
+$accept.Height = 36
+$accept.DialogResult = [System.Windows.Forms.DialogResult]::OK
+$form.AcceptButton = $accept
+$form.CancelButton = $cancel
+$form.Controls.Add($accept)
+$result = $form.ShowDialog()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) { exit 0 }
+exit 1
+'''
+            child_env = os.environ.copy()
+            child_env.update({
+                "AISKHUB_DIALOG_TITLE": context.title,
+                "AISKHUB_DIALOG_PROMPT": f"{prompt}\n\n确认请点击「{expect}」",
+                "AISKHUB_DIALOG_EXPECT": expect,
+            })
+            try:
+                result = subprocess.run(
+                    [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-Command", script],
+                    capture_output=True, text=True, timeout=660, env=child_env,
+                )
+                accepted = result.returncode == 0
+                audit(context, "accepted" if accepted else "denied",
+                      detail="windows-winforms" if accepted else "windows-winforms-denied")
+                return accepted
+            except subprocess.TimeoutExpired:
+                audit(context, "cancelled", detail="windows-dialog-timeout")
+                return False
+            except (OSError, subprocess.SubprocessError) as exc:
+                # 继续走 TTY；GUI 进程通常没有 TTY，随后会按 fail-closed 处理。
+                audit(context, "denied", detail=f"windows-dialog-error:{type(exc).__name__}")
+
     if not sys.stdin.isatty():
         audit(context, "denied", detail="no-interactive-tty")
         return False

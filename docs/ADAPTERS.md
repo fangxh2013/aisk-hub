@@ -8,17 +8,17 @@
 
 | 客户端 | 内核标识 | 会话标识来源 | 钩子机制 (Hooks) | 原生弹窗支持 | 适配目录 |
 | :--- | :--- | :--- | :---: | :---: | :--- |
-| **Codex** | `codex` | `CODEX_THREAD_ID` / `CODEX_SESSION_ID` | 弱依赖 (指令级) | ✅ AppleScript | `adapters/codex/` |
-| **Claude** | `claude` | `CLAUDE_CODE_SESSION_ID` | ✅ 原生 `settings.json` | ✅ AppleScript | `adapters/claude/` |
-| **Antigravity** | `antigravity` | `conversationId` | ✅ Stdio MCP 2.0 | ✅ AppleScript | `adapters/antigravity/` |
-| **WorkBuddy** | `workbuddy` | `CODEBUDDY_SESSION_ID` | ✅ `.codebuddy/settings.json` | ✅ AppleScript | `adapters/workbuddy/` |
-| **WorkBuddy AI** | `workbuddy-ai` | `CODEBUDDY_SESSION_ID` + `WORKBUDDY_CONFIG_DIR` | ✅ `.codebuddy/settings.json` | ✅ AppleScript | `adapters/workbuddy-ai/` |
+| **Codex** | `codex` | `CODEX_THREAD_ID` / `CODEX_SESSION_ID` | 弱依赖 (指令级) | ✅ macOS AppleScript / Windows WinForms | `adapters/codex/` |
+| **Claude** | `claude` | `CLAUDE_CODE_SESSION_ID` | ✅ 原生 `settings.json` | ✅ macOS AppleScript / Windows WinForms | `adapters/claude/` |
+| **Antigravity** | `antigravity` | `conversationId` | ✅ Stdio MCP 2.0 | ✅ macOS AppleScript / Windows WinForms | `adapters/antigravity/` |
+| **WorkBuddy** | `workbuddy` | `CODEBUDDY_SESSION_ID` | ✅ `.codebuddy/settings.json` | ✅ macOS AppleScript / Windows WinForms | `adapters/workbuddy/` |
+| **WorkBuddy AI** | `workbuddy-ai` | `CODEBUDDY_SESSION_ID` + `WORKBUDDY_CONFIG_DIR` | ✅ `.codebuddy/settings.json` | ✅ macOS AppleScript / Windows WinForms | `adapters/workbuddy-ai/` |
 
 ---
 
-## 二、高危操作系统原生弹窗契约 (macOS AppleScript)
+## 二、高危操作系统原生弹窗契约
 
-凡涉及**合并主干（dev/master/main）、推送远端、落地代码（land/promote）、执行 DDL 迁移或生产发布等关键/高危操作**，必须通过系统原生弹窗（`/usr/bin/osascript`）向用户请求确认，严禁静默执行。
+凡涉及**合并主干（dev/master/main）、推送远端、落地代码（land/promote）、执行 DDL 迁移或生产发布等关键/高危操作**，必须通过当前操作系统的原生 UI 向用户请求确认，严禁静默执行。macOS 使用 `/usr/bin/osascript`；Windows 使用当前交互桌面的 PowerShell WinForms。无图形桌面或弹窗超时统一拒绝。
 
 ### 1. 标题标准协议
 **标题必须直接可见对应工具名称**，格式严格为：
@@ -31,7 +31,7 @@
 - `落地代码-workbuddy-ai｜T001`
 
 ### 2. 授权判定铁律
-只有捕获到 `button returned:<操作动作>` 且 `gave up:false` 时才判定为用户真实授权；返回取消或 600 秒超时必须立即终止操作，严格保持原状。
+macOS 只有捕获到 `button returned:<操作动作>` 且 `gave up:false` 时才判定为用户真实授权；Windows 只有 WinForms 的确认按钮返回成功才授权。返回取消、超时或 UI 启动失败必须立即终止操作，严格保持原状。
 
 ---
 

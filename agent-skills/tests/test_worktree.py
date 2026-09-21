@@ -160,6 +160,16 @@ class MergeSafety(Sandbox):
         self.assertEqual(git.sha(self.repo, "fxh"), before)
         self.assertEqual(self.reg.load(task["id"])["state"], "rejected")
 
+    def test_land_rejects_unrelated_integration_history_with_actionable_error(self):
+        task = self.new()
+        self.commit(task)
+        self.ready(task)
+        before = git.sha(self.repo, "fxh")
+        with patch.object(integrate.git, "merge_base", return_value=None):
+            self.assertEqual(self.run_cmd(f"land {task['id']} --dry-run"), 1)
+        self.assertEqual(git.sha(self.repo, "fxh"), before)
+        self.assertEqual(self.reg.load(task["id"])["state"], "ready")
+
     def test_task_guard_rejects_main_and_bulk_conflict_choices(self):
         self.enable_policy()
         task = self.new()
@@ -175,6 +185,22 @@ class MergeSafety(Sandbox):
             with self.subTest(command=command), self.assertRaises(guards.Deny):
                 guards.check_bash(self.cfg, command, task_root, task_root)
         self.assertFalse(guards.check_bash(self.cfg, "git log origin/main", task_root, task_root))
+
+    def test_task_commit_is_independent_from_dirty_integration_checkout(self):
+        task = self.new()
+        # 模拟用户正在 fxh 主工作区编辑的业务文件；任务 worktree 仍应可以独立提交、check、ready。
+        (self.repo / "file.txt").write_text("fxh 上未提交的用户修改\n")
+        wt = Path(task["repos"]["be"]["path"])
+        (wt / "task.txt").write_text("任务分支修改\n")
+        with patch.dict(os.environ, {"AISK_TOOL": "codex", "AISK_SESSION": "commit-test"}):
+            self.assertEqual(self.run_cmd(
+                f'commit {task["id"]} --repos be --path task.txt -m "feat: 任务分支独立提交"'), 0)
+        self.assertTrue(git.dirty(self.repo), "fxh 的用户改动必须原样保留")
+        self.assertEqual(git.sha(self.repo, "fxh"), task["repos"]["be"]["base_sha"])
+        self.assertEqual(self.run_cmd(f"check {task['id']}"), 0)
+        self.fill_handoff(task)
+        self.assertEqual(self.run_cmd(f"ready {task['id']}"), 0)
+        self.assertTrue(self.reg.load(task["id"])["repos"]["be"]["ready_sha"])
 
 
 class RepoAutonomy(Sandbox):
@@ -507,6 +533,16 @@ class SafetyRegression(Sandbox):
         self.assertEqual((self.repo / ".git/config").read_bytes(), before)
         self.assertFalse(self.cfg.hub.exists())
 
+    def test_stale_worktree_quarantine_preserves_directory(self):
+        stale = self.root / "gate"
+        stale.mkdir()
+        (stale / ".git").write_text("gitdir: missing-admin\n")
+        (stale / "unknown.txt").write_text("preserve\n")
+        kept = doctor.quarantine_stale_worktree(stale)
+        self.assertFalse(stale.exists())
+        self.assertEqual((kept / "unknown.txt").read_text(), "preserve\n")
+        self.assertTrue(kept.name.startswith("gate.stale-"))
+
     def test_missing_salvage_source_rejected(self):
         with self.assertRaises(WtError):
             tasks.salvage_dir(self.cfg, self.reg, self.root / "absent", "be", "fxh", "missing")
@@ -553,8 +589,10 @@ class SafetyRegression(Sandbox):
         self.ready(t)
         self.run_cmd(f"land {t['id']}")
         tip = git.sha(self.repo, "fxh")
+        (self.repo / "file.txt").write_text("fxh 主工作区仍有用户未提交改动\n")
         with patch.object(registry, "confirm_human", return_value=True):
             self.assertEqual(self.run_cmd("promote --repos be"), 0)
+        self.assertTrue(git.dirty(self.repo), "promote 不得吞掉 fxh 主工作区的用户改动")
         self.assertEqual(git.sha(remote, "dev"), tip)
         self.assertEqual(self.reg.load(t["id"])["state"], "promoted")
 
@@ -1008,6 +1046,34 @@ class GuardsAndHooks(Sandbox):
 
 
 class BindAndCli(Sandbox):
+    def test_windows_dialog_uses_native_backend_and_tool_title(self):
+        ctx = registry.ActionContext("workbuddy", "git推送", task_id="T009", repository="backend")
+        result = subprocess.CompletedProcess(["powershell.exe"], 0, "", "")
+        with patch.object(registry, "IS_WIN", True), \
+             patch.object(registry.shutil, "which", return_value="powershell.exe"), \
+             patch.object(registry.subprocess, "run", return_value=result) as run:
+            self.assertTrue(registry.confirm_human("发布任务分支", "确认推送", context=ctx))
+        argv = run.call_args.args[0]
+        self.assertIn("-STA", argv)
+        self.assertIn("AISKHUB_DIALOG_TITLE", run.call_args.kwargs["env"])
+        self.assertEqual(run.call_args.kwargs["env"]["AISKHUB_DIALOG_TITLE"], "git推送-workbuddy | T009 | backend")
+
+    def test_windows_publish_is_confirmed_and_never_force_pushes(self):
+        self.prof["worktrees"]["hub"] = str(self.root / "hub")
+        cfg = build_config(self.prof, "windows")
+        task = {"id": "W009", "repos": {"be": {"branch": "tasks/W009-demo", "ready_sha": "a" * 40}}}
+        with patch.object(tasks, "_hub_remote_url", return_value="file:///central/hub.git"), \
+             patch.object(tasks.git, "sha", return_value="a" * 40), \
+             patch.object(tasks.git, "out", side_effect=["", "a" * 40 + "\trefs/heads/tasks/W009-demo"]), \
+             patch.object(tasks.git, "run") as run, \
+             patch.object(registry, "confirm_human", return_value=True) as confirm, \
+             patch.object(tasks, "atomic_json"):
+            tasks.publish_to_hub(cfg, task, tool="workbuddy", sessions=["s-009"])
+        pushed = run.call_args.args[0]
+        self.assertEqual(pushed[0], "push")
+        self.assertNotIn("--force", pushed)
+        self.assertEqual(confirm.call_args.kwargs["context"].title, "git推送-workbuddy | W009 | be")
+
     def test_bind_plan_is_idempotent_and_replaces_legacy_blocks(self):
         home = self.root / "home"
         (home / ".claude").mkdir()

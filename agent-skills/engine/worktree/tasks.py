@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """任务生命周期：new / find / claim / release / heartbeat / note / pause / resume / status / open /
-check / ready / restack / archive / restore / salvage / merge-commit / adopt / adopt-branch / overlap。
+check / commit / ready / restack / archive / restore / salvage / merge-commit / adopt / adopt-branch / overlap。
 
 锁的约定：登记簿锁（registry）不可重入，本模块内任何持锁代码都不再调用会取锁的函数；
 耗时的 git worktree add 不在登记簿锁内执行——先写"创建中"占位记录保留编号、端口与标题，再建目录。
@@ -19,9 +19,10 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import actor, bind, gates, gitops as git, model
+from . import actor, bind, gates, gitops as git, model, registry
 from . import names
 from .config import WtConfig, WtError
+from ..action_context import ActionContext, ActionContextError
 from .registry import (LIVE_STATES, WORKING_STATES, Registry, atomic_json, atomic_text, file_lock, now_iso,
                        parse_iso, remove_tree, say, stamp)
 
@@ -97,7 +98,13 @@ def activity_ts(cfg: WtConfig, task, quick=False):
                 if ct:
                     stamps.append(ct)
             if not quick:
-                for p in git.dirty_paths(path)[:200]:
+                try:
+                    dirty = git.dirty_paths(path)[:200]
+                except (OSError, WtError):
+                    # 旧任务目录可能被外部清理；看板必须报告异常而不是拖垮
+                    # 新任务的创建、认领和提交。
+                    dirty = []
+                for p in dirty:
                     try:
                         stamps.append((path / p).stat().st_mtime)
                     except OSError:
@@ -742,10 +749,15 @@ def task_changes(cfg, task, alias):
     path = Path(task["repos"][alias]["path"])
     if not path.exists():
         return set()
-    base = git.merge_base(path, base_ref(cfg), "HEAD") or task["repos"][alias]["base_sha"]
-    files = set(git.diff_names(path, base, "HEAD"))
-    files.update(git.dirty_paths(path))
-    return files
+    try:
+        base = git.merge_base(path, base_ref(cfg), "HEAD") or task["repos"][alias]["base_sha"]
+        files = set(git.diff_names(path, base, "HEAD"))
+        files.update(git.dirty_paths(path))
+        return files
+    except (OSError, WtError):
+        # 失效/被外部删除的旧 worktree 由 doctor 负责修复；它不能阻塞
+        # 与之无关的新任务，也不能被错误地当成有改动而制造假冲突。
+        return set()
 
 
 def overlaps(cfg, reg):
@@ -769,7 +781,67 @@ def cmd_overlap(cfg, reg, args):
     return 1
 
 
-# ------------------------------------------------------------------ check / ready / restack
+# ------------------------------------------------------------------ check / commit / ready / restack
+def _commit_paths(repo, paths, all_paths):
+    """把提交范围限制在任务仓库内；不让 `aisk task commit` 退化成跨目录 git add。"""
+    if all_paths and paths:
+        raise WtError("--all 与显式路径不能同时使用")
+    if not all_paths and not paths:
+        raise WtError("请指定提交路径，或使用 --all 提交当前任务仓库的全部改动")
+    if all_paths:
+        return ["."]
+    root = Path(repo).resolve()
+    result = []
+    for raw in paths:
+        value = str(raw)
+        candidate = (root / value).resolve() if not Path(value).is_absolute() else Path(value).resolve()
+        if candidate != root and root not in candidate.parents:
+            raise WtError(f"提交路径越界：{raw}")
+        # 已删除的 tracked path 也允许传入；Git 负责判断是否存在。
+        result.append(candidate.relative_to(root).as_posix() if candidate != root else ".")
+    return result
+
+
+def cmd_commit(cfg, reg, args):
+    """在任务分支本地提交，完全不读取或修改 fxh 主工作区，也不推送远端。"""
+    tool, sessions = caller(args)
+    message = (args.message or "").strip()
+    if not message:
+        raise WtError("提交说明不能为空")
+    with reg.lock():
+        task = reg.find_by_ref(args.task)
+        require_local(cfg, task, ("active", "rejected", "parked", "ready"))
+        refuse_if_foreign(cfg, task, tool, sessions, "提交")
+        aliases = select_repos(cfg, task, getattr(args, "repos", None))
+        committed = []
+        for alias in aliases:
+            path = Path(task["repos"][alias]["path"])
+            if git.current_branch(path) != task["repos"][alias]["branch"]:
+                raise WtError(f"{alias}: 当前分支不是任务分支 {task['repos'][alias]['branch']}")
+            err = model.check_message(cfg, message)
+            if err:
+                raise WtError(err)
+            add_paths = _commit_paths(path, args.paths, args.all)
+            git.run(["add", "-A", "--", *add_paths], cwd=path)
+            staged = git.out(["diff", "--cached", "--name-only", "--"], cwd=path)
+            if not staged:
+                raise WtError(f"{alias}: 没有可提交的暂存改动（路径可能为空）")
+            git.run(["commit", "-m", message], cwd=path)
+            sha = git.sha(path, "HEAD")
+            task["repos"][alias]["ready_sha"] = None
+            committed.append(f"{alias}@{sha[:9] if sha else 'unknown'}")
+        if task.get("state") in ("ready", "parked", "rejected"):
+            task["owner"] = task.get("owner") or new_owner(cfg, tool, sessions)
+            reg.set_state(task, "active", note="任务分支本地提交；ready 登记已失效")
+        else:
+            append_progress(task, progress_line(tool or "操作者", "任务分支本地提交：" + "、".join(committed)))
+            reg.save(task)
+        reg.event("commit", task=task["id"], tool=tool, repos=committed, remote_push=False)
+    say("ok", f"{task['id']} 已提交到任务分支：{'、'.join(committed)}；未检查或修改 fxh，未推送远端")
+    refresh_board(cfg, reg)
+    return 0
+
+
 def cmd_check(cfg, reg, args):
     task = reg.find_by_ref(args.task)
     require_local(cfg, task, LIVE_STATES)
@@ -872,7 +944,7 @@ def cmd_ready(cfg, reg, args):
         for alias in passed:
             task["repos"][alias]["ready_sha"] = git.sha(Path(task["repos"][alias]["path"]), "HEAD")
         if cfg.os == "windows":  # pragma: no cover - 仅 Windows
-            publish_to_hub(cfg, task)
+            publish_to_hub(cfg, task, args=args, tool=tool, sessions=sessions)
         reg.set_state(task, "ready", note="ready：" + "、".join(passed) + (f"；未过：{'、'.join(failed)}" if failed else ""))
     say("ok", f"{task['id']} 已 ready：" + "，".join(f"{a}@{task['repos'][a]['ready_sha'][:9]}" for a in passed))
     if failed:
@@ -882,13 +954,74 @@ def cmd_ready(cfg, reg, args):
     return 1 if failed else 0
 
 
-def publish_to_hub(cfg, task):  # pragma: no cover - 仅 Windows
-    for alias, r in task["repos"].items():
-        git.run(["push", "--force", "hub", f"refs/heads/{r['branch']}:refs/heads/{r['branch']}"],
-                cwd=cfg.repo(alias).path)
-    data = {k: v for k, v in task.items() if not k.startswith("_")}
-    data.update(state="ready", updated_at=now_iso())
-    atomic_json(cfg.win_state_dir / f"{task['id']}.json", data)
+def _hub_remote_url(repo):
+    return git.out(["remote", "get-url", "hub"], cwd=repo, check=False).strip()
+
+
+def _hub_remote_is_local(url):
+    """Windows 侧中央交换只允许 hub 共享目录/UNC/本机路径，不把 ready 变成公网推送。"""
+    value = str(url or "").lower()
+    return (value.startswith(("file:", "\\\\", "/", "./", "../"))
+            or (len(value) >= 3 and value[1:3] in (":\\", ":/")))
+
+
+def _hub_confirm(args, tool, sessions, task, alias, repo, branch, sha):
+    try:
+        context = ActionContext(
+            tool=tool or "", action="git推送", task_id=task["id"],
+            session_id=(sessions or [""])[0], risk_level="HIGH",
+            summary=f"{alias} 任务分支 {branch} 发布到中央 hub", repository=alias,
+        )
+    except (ActionContextError, IndexError, TypeError):
+        return False
+    prompt = (f"即将把任务 {task['id']} 的 {alias} 分支发布到中央交换 hub。\n\n"
+              f"仓库：{alias}\n分支：{branch}\n提交：{sha[:9]}\n"
+              "操作：只更新中央 hub，不推送 GitHub/公网；Mac 集成端后续仍需 land/promote。")
+    print(prompt)
+    return registry.confirm_human(prompt, "确认推送", context=context)
+
+
+def publish_to_hub(cfg, task, *, args=None, tool=None, sessions=None):  # pragma: no cover - 仅 Windows
+    """Windows ready 的中央交换发布：确认 → 非强制推送 → ls-remote 回读校验。
+
+    旧实现使用 --force，既没有弹窗，也可能覆盖 Mac 侧刚发布的同名任务分支；
+    现在任何一个 alias 失败都不写 ready 状态，并保留 partial 记录供重试。
+    """
+    published = []
+    try:
+        for alias, r in task["repos"].items():
+            repo = cfg.repo(alias).path
+            url = _hub_remote_url(repo)
+            if not url:
+                raise WtError(f"{alias}: 没有配置 hub 远端，无法中央交换")
+            if not _hub_remote_is_local(url):
+                raise WtError(f"{alias}: hub 不是本地/UNC 中央交换地址，Windows 禁止直接对外推送：{url[:120]}")
+            sha = git.sha(repo, f"refs/heads/{r['branch']}")
+            if not sha or sha != r.get("ready_sha"):
+                raise WtError(f"{alias}: ready 提交与任务分支头不一致，请重新 ready")
+            remote = git.out(["ls-remote", "--heads", "hub", f"refs/heads/{r['branch']}"], cwd=repo, check=False)
+            old = remote.split()[0] if remote.split() else None
+            if old == sha:
+                published.append(alias)
+                continue
+            if not _hub_confirm(args, tool, sessions, task, alias, repo, r["branch"], sha):
+                raise WtError(f"{alias}: 未确认中央 hub 发布，已停止")
+            # 非强制推送：远端同名分支若已被另一端推进，Git 拒绝而不是覆盖。
+            git.run(["push", "hub", f"refs/heads/{r['branch']}:refs/heads/{r['branch']}"], cwd=repo)
+            check = git.out(["ls-remote", "--heads", "hub", f"refs/heads/{r['branch']}"], cwd=repo, check=False)
+            got = check.split()[0] if check.split() else None
+            if got != sha:
+                raise WtError(f"{alias}: hub 回读提交 {str(got)[:9]} 与预期 {sha[:9]} 不一致")
+            published.append(alias)
+        data = {k: v for k, v in task.items() if not k.startswith("_")}
+        data.update(state="ready", updated_at=now_iso(), hub_published=published)
+        atomic_json(cfg.win_state_dir / f"{task['id']}.json", data)
+    except Exception as exc:
+        partial = {"id": task["id"], "state": "publish-partial", "published": published,
+                   "failed": [a for a in task["repos"] if a not in published],
+                   "error": str(exc)[:500], "updated_at": now_iso()}
+        atomic_json(cfg.win_state_dir / f"{task['id']}.partial.json", partial)
+        raise
 
 
 def cmd_restack(cfg, reg, args):
