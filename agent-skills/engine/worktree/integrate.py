@@ -231,6 +231,16 @@ def plan_landing(cfg: WtConfig, reg: Registry, task, alias, from_hub):
     if head and git.is_ancestor(repo, tip, head):
         # 没有要落的提交：主工作区干不干净都与它无关，不该被挡
         return {"status": "already", "head": head, "tip": tip}
+    if head and not git.merge_base(repo, head, tip):
+        remote_integration = git.sha(repo, f"origin/{cfg.integration}")
+        hint = ""
+        if remote_integration and git.merge_base(repo, remote_integration, tip):
+            hint = (f"；origin/{cfg.integration}@{remote_integration[:9]} 与任务有共同祖先，"
+                    f"请先把本地 {cfg.integration} 安全同步到远端主线")
+        raise Reject(
+            f"本地 {cfg.integration}@{head[:9]} 与任务提交 {tip[:9]} 没有共同祖先，"
+            f"拒绝无关历史合并{hint}；请先核对主线/远端是否切换或重建"
+        )
     if git.current_branch(repo) != cfg.integration:
         raise Reject(f"主工作区不在 {cfg.integration}")
     if git.dirty(repo):

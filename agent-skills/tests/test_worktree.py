@@ -160,6 +160,16 @@ class MergeSafety(Sandbox):
         self.assertEqual(git.sha(self.repo, "fxh"), before)
         self.assertEqual(self.reg.load(task["id"])["state"], "rejected")
 
+    def test_land_rejects_unrelated_integration_history_with_actionable_error(self):
+        task = self.new()
+        self.commit(task)
+        self.ready(task)
+        before = git.sha(self.repo, "fxh")
+        with patch.object(integrate.git, "merge_base", return_value=None):
+            self.assertEqual(self.run_cmd(f"land {task['id']} --dry-run"), 1)
+        self.assertEqual(git.sha(self.repo, "fxh"), before)
+        self.assertEqual(self.reg.load(task["id"])["state"], "ready")
+
     def test_task_guard_rejects_main_and_bulk_conflict_choices(self):
         self.enable_policy()
         task = self.new()
