@@ -86,3 +86,7 @@ Codex 默认通过已安装 CLI 获取这些能力，已有原生工具继续处
 check 和 ready。Windows ready 通过本地/UNC hub 中央交换，确认框标题包含
 `git推送-<工具>`，确认后非强制推送并回读校验；Mac 再执行 land/promote。只有实际修改
 `fxh` 文件树的 land 才要求该主工作区干净。
+
+任务外日常开发的 `fxh` / `fxh-dev` commit 和 push 默认放行；推送或合入 `dev`、`main`、
+`master` 以及 profile trunk 必须弹出带工具名的确认框。临时 clone 无法继承本地钩子，
+因此团队仓库还必须配置远端 branch protection，详见 `../docs/REMOTE-BRANCH-PROTECTION.md`。

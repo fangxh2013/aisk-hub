@@ -102,10 +102,12 @@ INTERPRETER_WRITE_RE = re.compile(
 GUARD_BROKEN = "任务守卫自身异常（{detail}）：读可以继续，写入、提交、推送一律拒绝。修复守卫后再继续。"
 MANUAL_ONLY_BRANCHES = {"main", "master"}
 
-# 任务之外只对真正可能产生外部影响的动作询问人。任务内的 push 仍沿用
-# GIT_FORBIDDEN_ALWAYS（无条件拒绝），不能被这个「任务外确认」分支绕开。
-OUTSIDE_CONFIRM_TOOLS = frozenset({"workbuddy", "workbuddy-ai"})
-OUTSIDE_CONFIRM_ACTIONS = {"push": "git push"}
+# 任务之外只对受保护分支的写操作询问人。个人集成分支（例如 fxh → fxh-dev）
+# 是日常开发闭环，默认放行；dev/main/master 等受保护分支和 merge dev 必须确认。
+# 任务内的 push 仍沿用 GIT_FORBIDDEN_ALWAYS（无条件拒绝），不能被这个「任务外确认」分支绕开。
+OUTSIDE_CONFIRM_TOOLS = frozenset({"codex", "claude", "antigravity", "workbuddy", "workbuddy-ai", "cursor"})
+OUTSIDE_CONFIRM_ACTIONS = {"push": "git推送", "merge": "git合并"}
+DEFAULT_PROTECTED_PUSH_BRANCHES = frozenset({"dev", "main", "master"})
 LOCAL_REMOTE_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 LOCAL_REMOTE_SUFFIXES = (".local", ".lan", ".internal", ".intranet", ".corp")
 
@@ -702,8 +704,8 @@ def _scan_outside_argv(argv, hits, depth=0):
             i += 1
         else:
             i += 1
-    if i < len(args) and args[i] == "push":
-        hits.add("push")
+    if i < len(args) and args[i] in {"push", "merge"}:
+        hits.add(args[i])
 
 
 def _scan_outside_text(text, hits, depth=0):
@@ -853,8 +855,8 @@ def _outside_forbidden_reasons(command, cwd):
     return reasons
 
 
-def _outside_push_argv(argv, depth=0):
-    """从一组已分词的 shell argv 中取出 git push 的参数。"""
+def _outside_action_argv(argv, action, depth=0):
+    """从一组已分词的 shell argv 中取出 git <action> 的参数。"""
     if depth > MAX_DEPTH or not argv:
         return None
     i = 0
@@ -880,14 +882,14 @@ def _outside_push_argv(argv, depth=0):
             continue
         if base in SHELLS:
             script = shell_script(base, [str(v) for v in argv[i + 1:]])
-            return _outside_push_argv_text(script, depth + 1) if script is not None else None
+            return _outside_action_argv_text(script, action, depth + 1) if script is not None else None
         break
     argv = [str(v) for v in argv[i:]]
     if not argv:
         return None
     prog = prog_name(argv[0], set())
     args = argv[1:]
-    if prog == "git-push":
+    if prog == f"git-{action}":
         return args
     if prog != "git":
         return None
@@ -900,20 +902,16 @@ def _outside_push_argv(argv, depth=0):
             i += 1
         else:
             i += 1
-    return args[i + 1:] if i < len(args) and args[i] == "push" else None
+    return args[i + 1:] if i < len(args) and args[i] == action else None
 
 
-def _outside_push_argv_text(command, depth=0):
+def _outside_action_argv_text(command, action, depth=0):
     if command is None or depth > MAX_DEPTH:
         return None
-    try:
-        tokens = tokenize(str(command))
-    except ValueError:
-        return None
     text, substitutions = extract_substitutions(str(command))
-    # substitutions 里的 shell 命令即使不在顶层 argv，也可能包含真正的 push。
+    # substitutions 里的 shell 命令即使不在顶层 argv，也可能包含真正的动作。
     for inner in substitutions:
-        found = _outside_push_argv_text(inner, depth + 1)
+        found = _outside_action_argv_text(inner, action, depth + 1)
         if found is not None:
             return found
     try:
@@ -921,10 +919,18 @@ def _outside_push_argv_text(command, depth=0):
     except ValueError:
         return None
     for argv in split_simple(tokens):
-        found = _outside_push_argv(list(argv), depth)
+        found = _outside_action_argv(list(argv), action, depth)
         if found is not None:
             return found
     return None
+
+
+def _outside_push_argv(argv, depth=0):
+    return _outside_action_argv(argv, "push", depth)
+
+
+def _outside_push_argv_text(command, depth=0):
+    return _outside_action_argv_text(command, "push", depth)
 
 
 def _short_sha(value):
@@ -945,14 +951,17 @@ def outside_push_details(command, cwd):
     # 仍按 Git 的常见 remote 名称识别，避免把 `origin` 错报成待更新分支。
     if positional and (positional[0] in remotes or positional[0] in {"origin", "upstream", "hub"}) and len(positional) >= 2:
         remote = positional.pop(0)
+    all_refs = any(value in ("--all", "--mirror") for value in args)
     refs = positional or ([current] if current else ["当前分支"])
     targets = []
     for ref in refs:
         target = str(ref).rsplit(":", 1)[-1]
         target = re.sub(r"^refs/heads/", "", target)
+        if target in ("HEAD", "") and current:
+            target = current
         if target and target not in targets:
             targets.append(target)
-    branch = ",".join(targets) or "当前分支"
+    branch = "全部分支" if all_refs else (",".join(targets) or "当前分支")
     local_sha = git.sha(cwd, "HEAD")
     baseline = None
     if len(targets) == 1 and re.fullmatch(r"[A-Za-z0-9._/-]+", targets[0]):
@@ -966,15 +975,70 @@ def outside_push_details(command, cwd):
     else:
         operation = f"普通 fast-forward 推送，并且只更新 {branch}。"
     return {"repository": repo or "未知仓库", "branch": branch, "local_sha": _short_sha(local_sha),
-            "remote_base": _short_sha(baseline), "operation": operation}
+            "remote_base": _short_sha(baseline), "operation": operation,
+            "targets": targets, "all_refs": all_refs}
+
+
+def outside_merge_details(command, cwd):
+    """取得 git merge 的目标分支，不执行合并也不读取业务内容。"""
+    args = _outside_action_argv_text(command, "merge") or []
+    targets = []
+    for value in args:
+        if value == "--":
+            continue
+        if value.startswith("-"):
+            continue
+        target = str(value).rsplit(":", 1)[-1]
+        target = re.sub(r"^refs/(?:heads|remotes)/", "", target)
+        if target and target not in targets:
+            targets.append(target)
+    return {"repository": Path(str(cwd or os.getcwd())).expanduser().name,
+            "branch": ",".join(targets) or "未知分支", "targets": targets}
+
+
+def _protected_targets(cwd):
+    """读取当前项目档案的受保护分支；档案不可读时使用最小安全默认值。"""
+    protected = set(DEFAULT_PROTECTED_PUSH_BRANCHES)
+    personal = set()
+    try:
+        cfg, _ = config.load_config(start=cwd)
+        protected.update(str(b) for b in cfg.protected)
+        for alias in cfg.repo_order:
+            repo = cfg.repo(alias)
+            protected.add(str(repo.trunk))
+            # integration_branch 是个人集成面（新华为 fxh），即使旧档案把它列在
+            # protected 中，也不能把日常 fxh → fxh-dev 推送误判成主干发布。
+            if cfg.integration and cfg.integration != repo.trunk:
+                personal.add(str(cfg.integration))
+            if repo.push_branch and repo.push_branch != repo.trunk:
+                personal.add(str(repo.push_branch))
+    except Exception:  # noqa: BLE001
+        pass
+    return protected, personal
+
+
+def _requires_branch_confirmation(cwd, targets, *, all_refs=False):
+    protected, personal = _protected_targets(cwd)
+    if all_refs or not targets:
+        return True
+    for target in targets:
+        # 个人集成分支优先于旧档案中的 protected 声明；只有仓库 trunk 不能走这个例外。
+        # 这兼容历史 profile 把 fxh 同时列入 protected 的情况。
+        if target in personal:
+            continue
+        if target in protected:
+            return True
+    return False
 
 
 def confirm_outside_high_risk(tool, normalized):
-    """任务外的对外动作由 WorkBuddy 弹窗确认；通过放行，拒绝/故障 fail-closed。
+    """任务外动作的分支策略：个人分支日常推送放行，受保护交付必须确认。
 
-    这个分支只在 `task_root is None` 时调用。任务内仍由现有守卫无条件拒绝 push，
-    因此不会把任务目录的推送封锁降级成「点一下就能过」。Codex、Antigravity、Claude、
-    Cursor 不进入这里，保持它们原来的作用域与行为。"""
+    这个分支只在 ``task_root is None`` 时调用。任务内仍由现有守卫无条件拒绝
+    push，因此不会把任务目录的推送封锁降级成「点一下就能过」。任务外支持的
+    AI 工具统一使用带工具名的确认框：``git推送-codex``、``git合并-claude`` 等。
+    ``dev/main/master`` 以及 profile 声明的 trunk 永远需要确认；``fxh``、
+    ``fxh-dev`` 这类个人集成分支默认不拦截。"""
     if tool not in OUTSIDE_CONFIRM_TOOLS or not normalized.get("command"):
         return None
     command = str(normalized["command"])
@@ -988,23 +1052,39 @@ def confirm_outside_high_risk(tool, normalized):
             if reason not in reasons:
                 reasons.append(reason)
     hits = scan_outside_high_risk(command)
-    remote, push_cwd = outside_push_context(candidates) if "push" in hits else ("", cwd)
+    _remote, push_cwd = outside_push_context(candidates) if "push" in hits else ("", cwd)
     details = outside_push_details(command, push_cwd) if "push" in hits else None
-    if "push" in hits and is_public_remote(remote):
-        host = _remote_host(remote)
-        reasons.append(f"{OUTSIDE_CONFIRM_ACTIONS['push']} 将发布到公开远端 {host}")
-    elif "push" in hits:
-        # 本地/内网远端不属于本次「公开发布」闸门；没有 origin 时 git 自身会给出错误。
+    merge_cwd = candidates[0] if candidates else cwd
+    merge = outside_merge_details(command, merge_cwd) if "merge" in hits else None
+
+    # 个人分支 push 是日常开发闭环，不能因为远端是 GitHub、内网或本地路径而误拦；
+    # dev/main/master 则不区分远端类型，一律进入确认框。远端是否真正禁止直推由
+    # GitHub/GitLab 等服务端保护规则兜底，不能只依赖临时 clone 的本地钩子。
+    if details and not _requires_branch_confirmation(
+        push_cwd, details.get("targets", []), all_refs=details.get("all_refs", False)
+    ):
         hits.discard("push")
         details = None
+    elif details:
+        target = details.get("branch", "受保护分支")
+        reasons.append(f"{OUTSIDE_CONFIRM_ACTIONS['push']} 将写入受保护分支 {target}")
+
+    if merge and not _requires_branch_confirmation(cwd, merge.get("targets", [])):
+        hits.discard("merge")
+        merge = None
+    elif merge:
+        reasons.append(f"{OUTSIDE_CONFIRM_ACTIONS['merge']} 将合入受保护分支 {merge.get('branch', '未知分支')}")
+
+    # 只有「git push / git merge」命中但已判定为个人分支时，才清除对应的默认命中；
+    # 自定义 forbidden_commands 产生的原因仍然保留，不能被分支例外绕过。
+    action_details = details or merge
     if not reasons:
         return None
     summary = "；".join(reasons[:3])
     if details:
-        # 与 Codex 的确认框对齐：标题标明工具/任务/仓库，正文给出提交、远端旧基线、
-        # fast-forward 与目标分支，按钮明确写「确认推送」。不显示完整 URL 或本地路径。
-        visibility = "公开远端"
-        prompt = (f"即将推送{visibility} {details['repository']} 的 {details['branch']}。\n\n"
+        # 标题由 ActionContext 统一生成，包含工具名；正文给出提交、远端旧基线、
+        # fast-forward 与目标分支，不显示完整 URL 或本地路径。
+        prompt = (f"即将推送 {details['repository']} 的受保护分支 {details['branch']}。\n\n"
                   f"仓库：{details['repository']}\n"
                   f"本地提交：{details['local_sha']}\n"
                   f"远端旧基线：{details['remote_base']}\n"
@@ -1012,6 +1092,14 @@ def confirm_outside_high_risk(tool, normalized):
         expect = "确认推送"
         action = "git推送"
         repository = details["repository"]
+    elif merge:
+        prompt = (f"即将把分支 {merge['branch']} 合入 {merge['repository']} 的受保护分支。\n\n"
+                  f"仓库：{merge['repository']}\n"
+                  f"目标：{merge['branch']}\n"
+                  f"命令：{command[:300]}")
+        expect = "确认合并"
+        action = "git合并"
+        repository = merge["repository"]
     else:
         prompt = (f"WorkBuddy 将在任务目录之外执行高风险动作：\n"
                   f"  目录：{cwd}\n"
@@ -1020,7 +1108,7 @@ def confirm_outside_high_risk(tool, normalized):
                   "这条操作不受 aisk 任务目录、租约与交付门禁保护。")
         expect = "确认"
         action = "高危动作"
-        repository = ""
+        repository = action_details.get("repository", "") if action_details else ""
     try:
         accepted = registry.confirm_human(
             prompt, expect, action=action, tool=tool, task_id=normalized.get("task_id", ""),
@@ -1101,8 +1189,9 @@ def evaluate(payload, tool, task_root=None):
     normalized = normalize(payload)
     task_root = locate_task(normalized, task_root)
     if task_root is None:
-        # 用户级 WorkBuddy hook 没有固定任务根，因此任务外动作必须在这里单独处理。
-        # 其它端保持原语义：它们的全局 hook/权限由各自适配层负责。
+        # 用户级宿主 hook 没有固定任务根，因此任务外动作必须在这里单独处理。
+        # 个人分支 push 默认放行，受保护分支 push/merge 统一交给带工具归属的确认框；
+        # 未接入宿主 hook 的工具仍由远端 branch protection 作为最终兜底。
         return confirm_outside_high_risk(tool, normalized)
     try:
         meta = json.loads(names.task_meta_file(task_root).read_text(encoding="utf-8"))

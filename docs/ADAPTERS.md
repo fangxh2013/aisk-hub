@@ -13,22 +13,27 @@
 | **Antigravity** | `antigravity` | `conversationId` | ✅ Stdio MCP 2.0 | ✅ macOS AppleScript / Windows WinForms | `adapters/antigravity/` |
 | **WorkBuddy** | `workbuddy` | `CODEBUDDY_SESSION_ID` | ✅ `.codebuddy/settings.json` | ✅ macOS AppleScript / Windows WinForms | `adapters/workbuddy/` |
 | **WorkBuddy AI** | `workbuddy-ai` | `CODEBUDDY_SESSION_ID` + `WORKBUDDY_CONFIG_DIR` | ✅ `.codebuddy/settings.json` | ✅ macOS AppleScript / Windows WinForms | `adapters/workbuddy-ai/` |
+| **Cursor** | `cursor` | `AISK_SESSION` / 宿主会话 | ✅ CLI 配置与守卫 | ✅ macOS AppleScript / Windows WinForms | `adapters/cursor/` |
 
 ---
 
 ## 二、高危操作系统原生弹窗契约
 
-凡涉及**合并主干（dev/master/main）、推送远端、落地代码（land/promote）、执行 DDL 迁移或生产发布等关键/高危操作**，必须通过当前操作系统的原生 UI 向用户请求确认，严禁静默执行。macOS 使用 `/usr/bin/osascript`；Windows 使用当前交互桌面的 PowerShell WinForms。无图形桌面或弹窗超时统一拒绝。
+凡涉及**合并主干（dev/master/main）、推送受保护分支、落地代码（land/promote）、执行 DDL 迁移或生产发布等关键/高危操作**，必须通过当前操作系统的原生 UI 向用户请求确认，严禁静默执行。个人集成分支（如 `fxh`、`fxh-dev`）的日常 commit/push 默认放行；可用 `merge_policy.confirm_personal_push: true` 重新开启个人推送确认。macOS 使用 `/usr/bin/osascript`；Windows 使用当前交互桌面的 PowerShell WinForms。无图形桌面或弹窗超时统一拒绝。
 
 ### 1. 标题标准协议
 **标题必须直接可见对应工具名称**，格式严格为：
-`动作-<工具名>｜<任务号>`
+`动作-<工具名>｜<任务号>`（任务外确认框追加 `｜<仓库>`）
 
 例如：
 - `git提交-codex｜T042`
 - `git合并-claude｜T042`
 - `git推送-antigravity｜T042`
 - `落地代码-workbuddy-ai｜T001`
+
+个人分支不弹窗不是安全漏洞：`dev/main/master` 和 trunk 仍强制确认，并且远端必须启用
+branch protection，防止临时 clone 绕过本地守卫。具体服务端设置见
+[远端分支保护](REMOTE-BRANCH-PROTECTION.md)。
 
 ### 2. 授权判定铁律
 macOS 只有捕获到 `button returned:<操作动作>` 且 `gave up:false` 时才判定为用户真实授权；Windows 只有 WinForms 的确认按钮返回成功才授权。返回取消、超时或 UI 启动失败必须立即终止操作，严格保持原状。

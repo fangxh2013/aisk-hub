@@ -51,7 +51,8 @@ DENY_VERBS = [
     "git push origin main*",
     "git push origin HEAD:main*",
     "git push * main*",
-    "git merge dev*",           # 合并到 main 的常见前置
+    # 不把 `git merge dev` 写成宿主级 hard-deny：内核需要识别目标并弹出
+    # `git合并-<工具>` 确认。直接合入 main 仍由 main 规则和远端保护阻断。
     "HBXH_ALLOW_MAIN_PUSH*",    # 人工放行开关，AI 不得使用。
                                 # 注意：这是**环境变量**不是命令，套 wrapper 后得到
                                 # `Bash(HBXH_ALLOW_MAIN_PUSH*)` 其实匹配不到任何命令。
