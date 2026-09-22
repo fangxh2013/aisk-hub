@@ -11,6 +11,7 @@ worktrees:
   # hub: <shared-exchange-path>
   integration_branch: integration
   protected:
+    - integration
     - main
     - dev
   # 个人集成分支默认可 commit/push；受保护分支和 trunk 必须确认。
@@ -19,7 +20,6 @@ worktrees:
     confirm_personal_push: false
     confirm_land: true
     forbid_main_operations: true
-    - main
   task_prefix: T                     # Windows 档案写 W，两端编号不碰撞
   branch_prefix: tasks/
   share_activity: true               # 两端都启用，才能互看对方进行中任务的只读摘要
