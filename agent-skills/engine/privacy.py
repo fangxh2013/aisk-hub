@@ -70,6 +70,7 @@ PUBLIC_PATHS = (
     # tests 目录仍逐个点名：本地常放未入库的历史用例，整目录入面会把它们一起导出去。
     "agent-skills/tests/test_action_context.py",
     "agent-skills/tests/test_contracts.py",
+    "agent-skills/tests/test_permissions.py",
     "agent-skills/tests/test_privacy.py",
     "agent-skills/tests/test_token_efficiency.py",
     "agent-skills/tests/test_token_runtime",
