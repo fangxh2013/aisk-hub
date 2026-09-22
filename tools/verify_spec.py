@@ -163,6 +163,11 @@ def validate_overlay_lock(manifest, lock=None, *, embedded=False, require_commit
     expected = contracts.overlay_digest(manifest)
     if lock_digest != expected:
         raise contracts.ContractError("Overlay lock.overlay_digest 与 manifest 内容不一致")
+    kernel_digest = str(lock.get("kernel_content_digest", ""))
+    if not re.fullmatch(r"[a-f0-9]{64}", kernel_digest):
+        raise contracts.ContractError("Overlay lock 必须提供 sha256 kernel_content_digest")
+    if kernel_digest != digest:
+        raise contracts.ContractError("Overlay lock.kernel_content_digest 与 manifest.public_kernel.content_digest 不一致")
     commit = str(lock.get("kernel_commit", ""))
     if require_commit and not re.fullmatch(r"[a-f0-9]{40}", commit):
         raise contracts.ContractError("真实 Overlay lock 必须绑定 40 位 kernel_commit")
@@ -171,13 +176,61 @@ def validate_overlay_lock(manifest, lock=None, *, embedded=False, require_commit
     return {"manifest_digest": expected, "kernel_commit": commit}
 
 
-def validate_real_overlay(manifest_path, lock_path=None):
+def kernel_archive_digest(root, commit):
+    """`git archive` 出 <commit> 的内容摘要；取不到（提交不在本仓库）返回 None。"""
+    try:
+        proc = subprocess.run(["git", "-C", str(root), "archive", "--format=tar", "--prefix=", commit],
+                              capture_output=True, timeout=180)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return hashlib.sha256(proc.stdout).hexdigest()
+
+
+def validate_kernel_pin(root, lock, *, strict):
+    """lock 声明的内核 commit 与摘要必须对得上本仓库，否则这枚 pin 只是装饰。
+
+    只校验 40 位格式时，一份钉着上个月提交的 lock 也能拿满分——而真正会被分发的
+    是工作区里的这份内核。这里落到内容摘要，并如实报告 pin 与 HEAD 的漂移。
+    """
+    commit = str(lock.get("kernel_commit", ""))
+    recorded = str(lock.get("kernel_content_digest", ""))
+    actual = kernel_archive_digest(root, commit)
+    if actual is None:
+        raise contracts.ContractError(
+            f"本仓库取不到 lock 钉住的内核提交 {commit[:12]}；没核对过就不能分发")
+    if actual != recorded:
+        raise contracts.ContractError(
+            f"lock.kernel_content_digest 与 {commit[:12]} 的实际归档摘要不符（实际 {actual[:12]}）")
+    head = git(root, "rev-parse", "HEAD") or ""
+    pin = {"kernel_commit": commit, "head": head,
+           "status": "matched" if head == commit else "drifted"}
+    if pin["status"] == "drifted" and strict:
+        raise contracts.ContractError(
+            f"要分发的内核是 {head[:12]}，Overlay lock 钉的是 {commit[:12]}；"
+            "请对当前内核重算 kernel_commit 与 kernel_content_digest 后再分发")
+    return pin
+
+
+def validate_real_overlay(manifest_path, lock_path=None, kernel_root=None, *, strict=False, pin_out=None):
     manifest = load_manifest_file(manifest_path)
     if not lock_path:
         raise contracts.ContractError("真实 Overlay 校验必须显式提供 --overlay-lock")
     lock = load_lock_file(lock_path)
     result = validate_overlay_lock(manifest, lock)
-    return f"真实 Overlay v2 通过，manifest_digest={result['manifest_digest']}"
+    pin = {"status": "unchecked"}
+    if kernel_root is not None:
+        pin = validate_kernel_pin(kernel_root, lock, strict=strict)
+    if pin_out is not None:
+        pin_out.clear()
+        pin_out.update(pin)
+    note = {
+        "matched": "内核 pin 与工作区 HEAD 一致",
+        "drifted": f"内核 pin 已漂移：HEAD {pin.get('head', '')[:12]} ≠ pin {pin.get('kernel_commit', '')[:12]}",
+        "unchecked": "未核对内核 pin",
+    }[pin["status"]]
+    return f"真实 Overlay v2 通过，manifest_digest={result['manifest_digest']}；{note}"
 
 
 def validate_skill_map_contract(root):
@@ -284,10 +337,16 @@ def overlay_checks(root):
                 "manifest_id": "example-overlay",
                 "overlay_digest": contracts.overlay_digest(locked),
                 "kernel_commit": "b" * 40,
+                "kernel_content_digest": "a" * 64,
                 "generated_at": "2026-01-01T00:00:00Z",
             }
             validate_overlay_lock(locked, external_lock)
-            return "兼容 Overlay 通过；未知插槽、可执行注入和错误 lock 被拒绝"
+            mismatched = dict(external_lock, kernel_content_digest="c" * 64)
+            try:
+                validate_overlay_lock(locked, mismatched)
+            except contracts.ContractError:
+                return "兼容 Overlay 通过；未知插槽、可执行注入、错误 lock 与对不上的内核摘要被拒绝"
+            raise AssertionError("内核摘要对不上的 lock 未被拒绝")
         raise AssertionError("非法 Overlay 未拒绝")
 
     def placeholder_is_not_real():
@@ -618,11 +677,14 @@ def main(argv=None):
         "details": "未提供真实 private manifest；本次仅完成离线契约验证。",
     }
     if args.private_manifest:
+        kernel_pin = {}
         real_check = run_check(
             "real_private_overlay_manifest",
-            lambda: validate_real_overlay(args.private_manifest, args.overlay_lock),
+            lambda: validate_real_overlay(args.private_manifest, args.overlay_lock, root,
+                                          strict=args.require_real, pin_out=kernel_pin),
             command="python3 tools/verify_spec.py --private-manifest <private-path>",
         )
+        real_file["kernel_pin"] = kernel_pin or {"status": "unchecked"}
         real_file.update({
             "status": "file-checked",
             "score": 100.0 if real_check["passed"] else 0.0,
@@ -659,6 +721,25 @@ def main(argv=None):
     final_certified = bool(offline_certified and (real_file["certified"] if args.require_real else True)
                            and (real_runtime["certified"] if args.probe_runtime else True))
 
+    # 结论只能说跑过的那几层。以前这里无条件写「真实运行时均通过」，而同一份 JSON 里
+    # runtime_status 还是 offline-only —— 这正是三分数分离要防的事。
+    certified_layers = ["offline_contract"] if offline_certified else []
+    if real_file["certified"]:
+        certified_layers.append("real_file")
+    if real_runtime["certified"]:
+        certified_layers.append("real_runtime")
+    note = ["离线契约" + ("通过 99.9+ 门禁" if offline_certified else "未通过门禁")]
+    note.append({
+        "offline-only": "真实文件未校验（未提供 manifest/lock）",
+        "file-checked": "真实文件校验通过" if real_file["certified"] else "真实文件校验未通过",
+    }.get(real_file["status"], f"真实文件：{real_file['status']}"))
+    note.append({
+        "offline-only": "真实运行时未联调，本结论不代表实机通过",
+        "runtime-certified": "真实运行时联调通过",
+        "runtime-failed": "真实运行时联调未通过",
+    }.get(real_runtime["status"], f"真实运行时：{real_runtime['status']}"))
+    certification_note = "；".join(note) + "。"
+
     summary = {
         "evaluation_title": "aisk 99.9+ executable contract verification",
         "evaluated_at": now_iso(),
@@ -676,11 +757,8 @@ def main(argv=None):
         "real_runtime_validation": real_runtime,
         "all_reports_passed": all_passed,
         "is_99_plus_certified": final_certified,
-        "certification_note": (
-            "离线契约、真实文件与真实运行时均通过 99.9+ 门禁。"
-            if final_certified else
-            "未达到完整 99.9+：offline_contract、真实文件和真实运行时分数分别查看对应字段。"
-        ),
+        "certified_layers": certified_layers,
+        "certification_note": certification_note,
         "reports": reports,
     }
     if not args.no_report_files:
