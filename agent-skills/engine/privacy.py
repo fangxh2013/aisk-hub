@@ -60,8 +60,18 @@ PUBLIC_PATHS = (
     "spec",
     "tools",
     "reports",
-    "agent-skills/skills/ai-worktree/SKILL.md",
+    # 整目录入面：新增技能或工具会自动进扫描面与导出面。逐个点名过一次名单没跟着
+    # 迁移改，skills 只剩 `ai-worktree/SKILL.md` 一条 —— 导出包缺 8 个技能，
+    # 共用同一份清单的 scan() 也读不到另外 19 个已发布文件（工作区侧假绿）。
+    "agent-skills/skills",
+    "agent-skills/tools",
+    ".gitignore",
+    "agent-skills/.gitignore",
+    # tests 目录仍逐个点名：本地常放未入库的历史用例，整目录入面会把它们一起导出去。
     "agent-skills/tests/test_action_context.py",
+    "agent-skills/tests/test_contracts.py",
+    "agent-skills/tests/test_privacy.py",
+    "agent-skills/tests/test_token_efficiency.py",
     "agent-skills/tests/test_token_runtime",
     "agent-skills/tests/test_worktree.py",
     "agent-skills/tests/protocol_worktree.sh",
@@ -144,6 +154,18 @@ def _excluded(path: Path, root: Path) -> bool:
     return any(Path(relative).match(pattern) for pattern in PRIVATE_DOC_PATTERNS)
 
 
+def _tracked_files(root: Path) -> set[Path] | None:
+    """被 git 跟踪的文件绝对路径；root 不是 git 工作树时返回 None（退回整树扫描）。"""
+    try:
+        res = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    return {root / rel for rel in res.stdout.split("\0") if rel}
+
+
 def scan(root: str | Path) -> list[dict]:
     root = Path(root).resolve()
     if not root.exists():
@@ -160,6 +182,12 @@ def scan(root: str | Path) -> list[dict]:
             candidates.append(path)
         elif path.is_dir():
             candidates.extend(p for p in path.rglob("*") if p.is_file())
+    tracked = _tracked_files(root)
+    if tracked is not None:
+        # 公开面 = 真的会被发布的文件。整目录入面之后，工作区里本地保留、从未入库的
+        # 文件（例如只被 .git/info/exclude 挡住的迁移脚本）不算公开面：它们发不出去，
+        # 为它们报红只会训练人忽略门禁。一旦 git add，它们立刻回到扫描范围。
+        candidates = [p for p in candidates if p in tracked]
     for path in sorted(set(candidates)):
         if not path.is_file() or _excluded(path, root) or path.suffix.lower() not in TEXT_SUFFIXES:
             continue
