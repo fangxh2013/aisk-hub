@@ -1,10 +1,36 @@
 import json
-
+import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from engine.action_context import ActionContext, ActionContextError, audit
 from engine.worktree import integrate, registry
+
+_AUDIT_SANDBOX = None
+_AUDIT_SAVED = None
+
+
+def setUpModule():
+    """把审计出口指到临时目录，别往真实确认日志里写测试数据。
+
+    本文件的弹窗用例只 patch 掉 osascript 那一层，confirm_human 本身是真跑的，
+    而它无论接受还是拒绝都会 audit()。不隔离的话，每跑一次全量套件就往
+    ~/.aisk-runtime/logs/dialog_audit.jsonl 追加两条「已批准推送」，和真人点过的
+    记录长得一模一样。那份日志是事后追查「谁批准过推主干」的唯一凭据，掺不得。
+    """
+    global _AUDIT_SANDBOX, _AUDIT_SAVED
+    _AUDIT_SAVED = os.environ.get("AISKHUB_RUNTIME_ROOT")
+    _AUDIT_SANDBOX = tempfile.TemporaryDirectory(prefix="aisk-audit-")
+    os.environ["AISKHUB_RUNTIME_ROOT"] = _AUDIT_SANDBOX.name
+
+
+def tearDownModule():
+    if _AUDIT_SAVED is None:
+        os.environ.pop("AISKHUB_RUNTIME_ROOT", None)
+    else:
+        os.environ["AISKHUB_RUNTIME_ROOT"] = _AUDIT_SAVED
+    _AUDIT_SANDBOX.cleanup()
 
 
 class ActionContextTests(unittest.TestCase):
