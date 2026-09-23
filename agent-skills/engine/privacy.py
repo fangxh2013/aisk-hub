@@ -69,12 +69,23 @@ PUBLIC_PATHS = (
     "agent-skills/.gitignore",
     # tests 目录仍逐个点名：本地常放未入库的历史用例，整目录入面会把它们一起导出去。
     "agent-skills/tests/test_action_context.py",
+    "agent-skills/tests/test_autoflow_recovery.py",
     "agent-skills/tests/test_contracts.py",
+    "agent-skills/tests/test_direct_checkout.py",
+    "agent-skills/tests/test_direct_tasks.py",
+    "agent-skills/tests/test_integrate_separated_flow.py",
+    "agent-skills/tests/test_main_branch_guard.py",
     "agent-skills/tests/test_permissions.py",
     "agent-skills/tests/test_privacy.py",
+    "agent-skills/tests/test_publish_driver.py",
+    "agent-skills/tests/test_publish_notify.py",
+    "agent-skills/tests/test_publish_pending.py",
+    "agent-skills/tests/test_publish_scheduler.py",
+    "agent-skills/tests/test_publish_worker.py",
     "agent-skills/tests/test_token_efficiency.py",
     "agent-skills/tests/test_token_runtime",
     "agent-skills/tests/test_worktree.py",
+    "agent-skills/tests/test_worktree_quota.py",
     "agent-skills/tests/protocol_worktree.sh",
 )
 TEXT_SUFFIXES = {".md", ".markdown", ".py", ".sh", ".json", ".yaml", ".yml", ".toml", ".txt", ".ini", ".cfg"}
