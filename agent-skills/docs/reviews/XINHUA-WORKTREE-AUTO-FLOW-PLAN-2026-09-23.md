@@ -2,6 +2,7 @@
 
 > 状态：设计提案，尚未实现。本文描述目标行为，不是当前运行规则。
 > 日期：2026-09-23
+> 修订：v1.1；补充现有 retention/gc 协同、槽位满载行为与推送待处理主动升级要求。
 > 目标：前后端任务完成后可靠地进入本地 fxh、自动发布到 fxh-dev 并回收任务 worktree；文档与 aisk 仓库不使用 worktree。
 
 ## 1. 决策摘要
@@ -26,7 +27,7 @@ fxh、fxh-dev、dev 和 master 都按**仓库独立配置**解释。禁止把一
 
 1. 只有目标任务提交的完整 SHA 已经是本仓库本地 fxh 的祖先，任务才能标记为“本地已落地”。
 2. 如果提交、门禁、冲突检查或快进失败，任务不得标记完成，也不得删除唯一工作副本。
-3. 如果 fxh-dev 推送失败，已落地到 fxh 的提交和任务归档仍保留；任务进入“个人分支待推送”，由后台或后续命令幂等重试。
+3. 如果 fxh-dev 推送失败，已落地到 fxh 的提交和任务归档仍保留；可恢复错误进入 push_pending 并幂等重试，确定性拒绝立即升级给用户，待处理超过时限也必须主动告警，不允许无限期静默挂起。
 4. “已发布”只在 origin/fxh-dev 确认包含目标 SHA 后成立。禁止用强推、重置或改写历史把失败伪装成成功。
 
 因此，系统承诺的是**成功才完成、失败可恢复、重试不重复提交**，不是在网络和远端规则失效时仍声称 100% 成功。
@@ -42,7 +43,8 @@ fxh、fxh-dev、dev 和 master 都按**仓库独立配置**解释。禁止把一
 5. 现有 land 已有来源审计、候选提交门禁、并发锁、落地前再次核对分支头，并以 --ff-only 合入本地集成分支；当前确认策略仍会要求人工点击。
 6. 当前 promote 对 ff-trunk 仓库不仅会推送 fxh-dev，还会继续处理本地 dev 与远端 dev。它不能直接作为“只静默推送 fxh-dev”的后台动作；必须先将个人分支发布与 dev 操作拆成互不调用的接口。
 7. 当前 archive 会把任务分支保存到 refs/aisk/archive/...，复制任务记录并移除 worktree；它是现有安全回收基础。自动流程需要在落地提交可恢复之后调用专用归档路径，不能把通用 --force 当作删除安全证明。
-8. 本机后端和前端的 fxh 当前工作区干净，各自领先 origin/fxh-dev 两个提交。这只说明当前基线适合本地试运行，不构成未来自动推送的绕过条件。
+8. 本机缓存的分支引用显示，后端和前端的本地 fxh 均比 origin/fxh-dev 超前 2 个提交、落后 0 个；这是本地引用快照，不代表运行时远端状态。前端还存在 origin/fxh 跟踪引用；截至本次评审所核实的本机引用，origin/fxh 与 origin/fxh-dev 相互独有 1272/1450 个提交。仓库规则只允许 fxh 推 origin/fxh-dev，远端 fxh 不是发布目标；不得把它当作候选 upstream、自动删除或自动修复。启用自动发布前必须在运行时重新校验 fxh 的 upstream/refspec 精确指向 origin/fxh-dev，并对实际目标做祖先关系预检；任何非快进或目标歧义都立即停止并升级。
+9. 当前已存在按时间与磁盘占用运行的 retention/gc，不是待建功能：默认 promoted_hours=72，gc 只把已上主干或已验收且超期的任务列为归档候选；archive_days=30 用于过期构建日志和归档引用，引用只有在提交已并入集成分支或主干时才会退休，未并入的引用保留；disk_budget_gb=10 由 doctor 检查并提醒；build_dirs 配置构建产物目录，默认不清理进行中任务的构建目录。gc 默认预览，显式 --apply 才执行回收。
 
 ### 2.1 成熟工具可借鉴的做法
 
@@ -78,9 +80,12 @@ stateDiagram-v2
     Landing --> LandedFxh: fxh 快进且包含 ready_sha
     Landing --> Blocked: 冲突/基线变化/门禁失败
     LandedFxh --> Archived: 保存归档引用后删除 worktree
-    Archived --> PublishPending: 自动推送被拒绝或暂时失败
+    Archived --> push_pending: 自动推送暂时失败
+    Archived --> needs_attention: 非快进/权限/保护规则拒绝
     Archived --> Published: fxh-dev 确认包含目标 SHA
-    PublishPending --> Published: 幂等重试成功
+    push_pending --> Published: 幂等重试成功
+    push_pending --> needs_attention: 满 15 分钟或失败 3 次
+    needs_attention --> blocked_publish: 满 1 小时仍未解决
 ~~~
 
 流程要求：
@@ -92,12 +97,12 @@ stateDiagram-v2
 5. 在本仓库集成锁下生成落地计划；校验任务来源、分支祖先、文件重叠、敏感路径、当前 fxh 头和工作区状态。对候选提交运行门禁。
 6. 使用 compare-and-swap 语义保护 fxh：只有 fxh 仍处于计划记录的 head，且候选可快进时才落地；分支在检查期间前进就重新计划，不强行覆盖。
 7. 合入后再次验证 fxh 包含 ready_sha，先写入可恢复的落地与归档记录，再移除任务 worktree 和任务分支。worktree 清理失败时保持 cleanup_pending 并重试，不回滚已正确落地的 fxh。
-8. 仅将本地 fxh 推至本仓库的 origin/fxh-dev，使用普通非强制推送。收到远端拒绝、网络超时或权限错误时记录 push_pending；禁止换 token、绕过保护或强推。
+8. 先验证本地 fxh 的 upstream/refspec 精确指向本仓库 origin/fxh-dev，再将本地 fxh 普通非强制推送至该目标；不得对 origin/fxh 做写操作。收到非快进/目标歧义时立即停止并升级，网络暂时失败时记录 push_pending；禁止换 token、绕过保护或强推。
 9. 用任务 ID、仓库键、ready_sha 和远端 SHA 更新登记簿。重复收到完成事件时必须识别已完成阶段，不得产生重复提交或把另一任务的提交登记在本任务名下。
 
 静默表示**无确认弹窗**，不表示隐藏失败。成功时保留可查询的审计记录；失败时在看板和当前执行会话中明确显示阻塞阶段与安全恢复方式。
 
-### 3.2 worktree 配额与回收策略
+### 3.2 worktree 配额与回收策略（叠加现有 retention/gc）
 
 建议作为首轮配置的上限：
 
@@ -116,7 +121,23 @@ stateDiagram-v2
 - 暂停任务默认保留现场并继续计入物理上限。可增加安全的压缩暂停：先验证提交和 WIP 引用完整、保存需要的忽略文件清单，再移除 worktree；不支持无损快照的目录只能保留并占用槽位。
 - 任务归档前验证 fxh 或任务归档引用可达；已完成、失败、暂停三类任务使用不同策略，不按年龄无差别删除。
 - 共享 Maven/npm 下载缓存可以减少重复下载；不要让多个任务共享可写的 node_modules、target 或应用运行目录来代替隔离。
-- 看板展示活跃槽位、暂停占用、清理待重试、每仓磁盘占用和最近失败原因。达到磁盘预算时先拒绝新工作树或清理已确认可归档任务，不触碰活跃任务。
+- 看板展示活跃槽位、暂停占用、清理待重试、每仓磁盘占用和最近失败原因。达到磁盘预算时先拒绝新工作树；只通过完成流水线已授权的即时归档，或用户显式运行 gc --apply，清理符合安全条件的任务，不触碰活跃任务。
+
+#### 与现有 retention/gc 的边界
+
+新方案**叠加现有 retention/gc，不替代它，也不重置现有阈值**。两者分别解决“现在能否再物化一个任务工作树”和“哪些已完成资源到期后可回收”，配置、状态和看板指标必须分开：
+
+| 机制 | 解决的问题 | 规则 |
+|---|---|---|
+| 活跃/物化槽位上限 | 新任务是否能立即创建 worktree | 同步准入控制。活跃、暂停、cleanup_pending 的真实目录都计入；排队任务不占物理槽位 |
+| retention.promoted_hours（默认 72 小时） | 已完成任务何时成为通用 gc 归档候选 | 保留现行规则，只处理已上主干或已验收且超过保留期的任务；不能因槽位不足提前删除暂停、活跃或未验证任务 |
+| retention.archive_days（默认 30 天） | 旧日志与已安全退休的归档引用何时到期 | 继续由现有 gc 处理；归档引用仅在提交已并入集成分支或主干后才可退休，未并入的引用无论多旧都保留。自动流水线任务还须确认 fxh-dev 已包含目标 SHA；push_pending 或 remote_sha 未确认时额外 pin 其归档引用 |
+| retention.disk_budget_gb（默认 10 GB） | 总任务目录磁盘占用的提醒阈值 | 保留 doctor 告警，并单独展示实际用量；达到阈值可阻止新 worktree 物化，但不能自动清理活跃现场 |
+| retention.build_dirs | 可清理的构建缓存/产物范围 | 沿用档案配置和现行 gc 安全规则；活动任务默认跳过，不能用共享可写构建目录换取槽位 |
+
+任务成功落地后的即时自动回收是完成流水线的专用步骤：它在确认 ready_sha 已包含于本地 fxh、持久化归档引用和检查点之后调用安全归档原语，满足本方案已授权的静默回收要求；这不等于启动通用 gc，也不等待 72 小时。不得为让即时归档生效而粗放扩大 gc 候选状态。通用 gc 仍用于既有任务的超期清理、构建产物、日志和到期归档引用，默认预览且只有显式 apply 才执行。两条路径必须幂等，GC 不得重复归档或删除流水线刚写入且仍作为唯一恢复副本的引用；对自动流水线任务，fxh-dev 尚未确认包含目标 SHA 时，即使本地 fxh 已包含提交，也必须保留归档引用。
+
+当槽位已满时，准入器只允许按完成流水线回收**刚刚安全落地且已验证**的任务；不得把 gc --apply 当作隐式腾位动作，也不得为配额驱逐暂停任务或跳过 72 小时保留期。没有安全可回收目录时，任务保持无 worktree 的 queued 状态（或在未实现排队前拒绝物化并报告占用），提示操作者查看 gc 预览。doctor/看板分别展示槽位占用、retention 到期候选、构建产物大小和磁盘预算告警，不能把“槽位满”与“磁盘超预算”合并成一个信号。
 
 ## 4. fxh、fxh-dev 与 dev 的权限边界
 
@@ -127,6 +148,7 @@ stateDiagram-v2
 - 在任务分支提交本任务改动；
 - 通过门禁后以快进方式更新本地 fxh；
 - 将本地 fxh 普通推送到 origin/fxh-dev；
+- 推送前验证本地 fxh 的 upstream/refspec 精确映射到 origin/fxh-dev；拒绝向 origin/fxh 写入；
 - 在提交已于本地 fxh 验证可达且归档引用已写入后回收任务 worktree。
 
 不得把无确认权扩展为所有 git push、所有 land、所有仓库或所有分支。每项授权必须同时匹配仓库、动作和目标分支。
@@ -185,6 +207,7 @@ main 在所有仓库中都是 AI 永久不可写目标。守卫必须阻断直�
 - 门禁命令版本、退出码与日志定位；
 - archive ref、worktree 路径和清理结果；
 - origin/fxh-dev（或 aisk 的 origin/master）推送前后 SHA 与失败分类；
+- 推送待处理的首次发生时间、尝试次数、下次重试时间、失败类别、升级时间与通知去重键；
 - 最后一次成功阶段、下一次安全重试动作。
 
 任务状态先落盘再做慢操作；启动恢复时按 Git 的真实祖先关系和现存 worktree 登记对账，不只相信状态文本。
@@ -198,7 +221,9 @@ main 在所有仓库中都是 AI 永久不可写目标。守卫必须阻断直�
 | 冲突、来源审计失败或 fxh 已前进 | 不重置、不覆盖 fxh，不选 ours/theirs | 进入 blocked_landing，重新计算候选或等待处理 |
 | 快进成功但进程在登记状态前崩溃 | 已有提交仍留在 fxh | 重启时根据 ready_sha 是否为 fxh 祖先恢复为 landed，不重复合并 |
 | worktree 删除失败 | 已落地提交和 archive ref 保持不变 | 进入 cleanup_pending，安全重试；不调用通用 prune |
-| 推送 fxh-dev 网络失败或被拒绝 | 本地集成/提交保留，远端状态不伪报成功 | 进入 push_pending，普通 push 幂等重试 |
+| fxh-dev 推送遇到可恢复的网络/服务错误 | 本地集成/提交保留，远端状态不伪报成功 | 进入 push_pending；按有上限的退避计划普通 push 重试，并持久化首次待处理时间、尝试次数和下次重试时间 |
+| fxh-dev 推送被非快进、权限或分支保护拒绝 | 本地集成/提交保留，不改写远端历史 | 立即转 needs_attention 并通知用户；禁止把确定性拒绝当成网络故障反复重试，禁止自动 merge/rebase/force |
+| push_pending 持续未解决 | 不得显示已发布或静默丢在后台 | 默认首次待处理满 15 分钟或已失败 3 次（先到者为准）时主动升级到当前任务/桌面可见通知并标记 needs_attention；满 1 小时仍未解决时再发一次升级通知并标记 blocked_publish。可恢复的瞬时错误之后按最长 60 分钟间隔继续幂等重试，但不重复发送相同告警；确定性错误暂停自动重试，等待用户处理。阈值可按档案调整，状态变化或解决后关闭告警 |
 | 用户取消 dev 弹窗 | 本地/远端 dev 均不变 | 结束本次显式操作，不后台重试写操作 |
 | 自动提交期间发现其他写者 | 不混合两份改动 | 释放或过期租约后重新检查，不猜文件归属 |
 
@@ -220,6 +245,13 @@ repos:
       land_to_local: fxh
       push_only: fxh-dev
       archive_after_verified_land: true
+      publish_pending_policy:
+        retry_delays_minutes: [1, 5, 15, 60]
+        needs_attention_after_minutes: 15
+        needs_attention_after_attempts: 3
+        blocked_after_minutes: 60
+        retry_only_transient_failures: true
+        notify_deduplication: task_repo_remote_stage
     limits:
       active_worktrees: 2
       materialized_worktrees: 4
@@ -236,6 +268,13 @@ repos:
       land_to_local: fxh
       push_only: fxh-dev
       archive_after_verified_land: true
+      publish_pending_policy:
+        retry_delays_minutes: [1, 5, 15, 60]
+        needs_attention_after_minutes: 15
+        needs_attention_after_attempts: 3
+        blocked_after_minutes: 60
+        retry_only_transient_failures: true
+        notify_deduplication: task_repo_remote_stage
   docs:
     workspace_mode: direct
     automatic_commit_branch: fxh
@@ -258,10 +297,12 @@ repos:
 2. 引入完成事件、任务单仓约束、每仓活跃/物化 worktree 配额和可重启的阶段记录。
 3. 把个人分支 push 从 promote: ff-trunk 拆出来，确保个人自动流程只有 fxh → fxh-dev，代码路径不具备写 dev 的能力。
 4. 增加精确仓库白名单的自动 land 与 post-land archive；在实际删除目录前验证归档引用和 fxh 祖先关系。
-5. 为 direct 仓库增加单写者租约、任务基线差异选择和 branch allowlist；单独验证 aisk 的 master 例外。
-6. 在模拟仓库完成全部故障注入和状态恢复验收后，才逐仓启用新华后端/前端档案。
-7. 盘点并安全退役 docs/aisk 遗留锚点：逐项确认进程、脏改动、锁、分支和恢复点；不批量 prune，不使用强制删除处理未知目录。
-8. 小流量试运行并观察 worktree 数、磁盘、门禁失败、推送待处理和误纳入文件；通过后再固定策略。
+5. 在新槽位准入器旁接入现有 retention/gc：复用当前阈值和安全候选逻辑，单独呈现槽位与磁盘/年龄指标；不把 gc --apply 暗中变成腾位动作；验证暂停任务、未合并归档引用和唯一恢复副本的保护条件。
+6. 为 push_pending 增加持久化重试时间、失败分类、15 分钟/3 次首次升级、60 分钟再次升级及通知去重；非快进、权限和保护规则拒绝立即升级，不自动改写远端历史。
+7. 为 direct 仓库增加单写者租约、任务基线差异选择和 branch allowlist；单独验证 aisk 的 master 例外。
+8. 在模拟仓库完成全部故障注入和状态恢复验收后，才逐仓启用新华后端/前端档案。
+9. 盘点并安全退役 docs/aisk 遗留锚点：逐项确认进程、脏改动、锁、分支和恢复点；不批量 prune，不使用强制删除处理未知目录。
+10. 小流量试运行并观察 worktree 数、磁盘、门禁失败、推送待处理时长/升级告警和误纳入文件；通过后再固定策略。
 
 ## 8. 验收门槛
 
@@ -269,26 +310,36 @@ repos:
 
 - 自动落地仅允许精确的新华后端/前端仓库和本地 fxh。
 - 自动个人推送仅允许 origin/fxh-dev；自动代码路径不能执行 dev merge 或 dev push。
+- 推送目标必须由仓库配置和 fxh upstream 双重校验为 origin/fxh-dev；origin/fxh 一律不是写目标，目标分叉/非快进必须立即阻断并告警。
 - main 的所有写入路径 fail-closed，不能通过配置、环境变量或命令行绕过。
 - 完成事件、门禁、落地、推送、归档任一步失败都不能伪报成功或丢失唯一工作副本。
 - 重放/重启不会重复提交、重复合并、把别的任务提交认领成当前任务。
 - docs/aisk direct 模式只提交任务文件集，不夹带任务开始前或并发写者的改动。
 - aisk 的 master 自动写入只对 aisk-hub、aisk-private 精确生效；main 仍永久禁止。
+- 槽位准入与 retention/gc 分离：不覆盖现有阈值；gc 默认仍为预览；槽位满不触发未经授权的 gc --apply；活跃/暂停现场和未并入集成分支的归档引用不可被配额或过期策略删除。
+- 即时 post-land archive 与通用 gc 幂等且可区分；GC 不重复归档，也不退休仍是唯一可恢复副本的引用。
+- push_pending 的可恢复错误具备有限退避与持久化状态；到 15 分钟或 3 次失败必有主动可见升级，60 分钟时再次升级；确定性拒绝立即告警；成功后关闭告警且重复轮询不重复通知。
+- 新流水线的 archive ref 在 fxh-dev 已验证包含目标 SHA 之前不可由 archive_days 退休；publish 状态、远端 SHA 和引用保留/释放决定必须跨重启一致。
+- 自动升级通知必须使用已配置且通过验收的任务/桌面通知入口；若运行环境没有可用通知入口，不得启用“静默自动推送”，只能持久化 needs_attention 并将启用判定置为未通过。
 
 ### 8.2 自动化测试与运行验收
 
 实现 AI 应至少覆盖以下用例；本提案写作过程中未运行测试：
 
 1. 同时创建多任务时验证全局与每仓配额；暂停任务仍占物理槽位；排队任务没有 worktree。
-2. 单后端、单前端任务分别提交、过门禁、快进本仓 fxh、推本仓 fxh-dev、归档并移除各自 worktree。
+2. 单后端、单前端任务分别提交、过门禁、快进本仓 fxh、校验 upstream 后推本仓 fxh-dev、归档并移除各自 worktree；试图将 origin/fxh 当目标或遇到非快进时立即阻断并告警。
 3. 跨仓需求被拆成两个独立任务；一个仓库被拒绝时另一仓库状态独立。
 4. fxh 在门禁中途前进、重叠脏改动、非快进、冲突、敏感路径和来源审计异常都阻止落地与回收。
 5. 注入进程崩溃点：任务提交后、fxh 快进后、archive ref 写入后、删除 worktree 后、远端 push 请求后；重启恢复仍能对账。
-6. 网络断开、权限拒绝和远端非快进时不强推、不重置，进入可重试状态。
+6. 网络暂断进入 push_pending 并按退避重试；持续待处理在 15 分钟或 3 次失败时仅升级一次、满 60 分钟再次升级；之后瞬时错误降到每 60 分钟重试且不重复通知；成功关闭告警且重复事件不重复通知。权限拒绝和远端非快进立即升级，不强推、不重置、不反复无效重试；无可用通知入口时自动推送启用门禁失败。
 7. fxh-dev 自动推送路径无法触及 dev；dev merge 需显式用户命令和弹窗；dev push 需另一明确命令和弹窗。
 8. 用不同 Git 命令包装、脚本、别名、钩子尝试写入 main 均被拦截；对 main 不存在“AI 例外”配置。
 9. direct 仓库中预置其他文件改动和并发写者，确认自动提交不夹带、不覆盖；未取得单写者租约时拒绝写。
 10. 审计日志包含任务号、仓库、SHA、阶段、确认结果和清理结果，不包含凭据、秘密文件内容或会话敏感信息。
+11. gc 预览与 apply 复用现有候选规则：promoted_hours 默认 72 小时、archive_days 默认 30 天、disk_budget_gb 默认 10 GB、build_dirs 按档案生效；预览不改动，apply 只处理符合现行安全条件的任务/产物。
+12. 活跃或暂停任务不成为超期归档候选；活动任务构建目录默认不清；未并入集成分支/主干的 archive ref 即使超过 archive_days 也保留；任务历史记录保留。
+13. 自动落地后的即时归档不等待 promoted_hours，但必须先验证 fxh 祖先关系并写 archive ref；push_pending 或 remote_sha 未验证的自动流水线任务，即使已超过 archive_days 也不得退休该引用；推送完成后才可从归档时间起按现行期限退休。
+14. 即时归档与 gc 重复触发、进程在 ref 写入或目录删除前后崩溃时均能幂等恢复；不会丢失工作树或唯一引用。
 
 真实分数应拆成“离线契约分”和“本机运行分”。方案设计可按下列 100 分量表评审；任何 P0 失败，综合分不得超过 89。没有真实仓库端到端证据时，不得宣称实现达到 99.9+。
 
@@ -296,11 +347,11 @@ repos:
 |---|---:|
 | 仓库、分支和自动/人工权限边界精确 | 20 |
 | 提交—门禁—落地—推送状态机正确、幂等 | 20 |
-| worktree 数量、暂停占用、回收和恢复完整 | 15 |
+| worktree 数量、暂停占用，以及与 retention/gc 的协同回收和恢复完整 | 15 |
 | main fail-closed 与 dev 双重授权 | 15 |
 | direct 仓库的文件范围、单写者和脏基线保护 | 10 |
-| 故障注入、重启恢复和远端失败验收 | 15 |
-| 审计、隐私和运维可观测性 | 5 |
+| 故障注入、重启恢复、推送超时升级和远端失败验收 | 15 |
+| 审计、隐私、告警去重和运维可观测性 | 5 |
 | **合计** | **100** |
 
 ## 9. 对实现 AI 的执行指示
@@ -316,6 +367,7 @@ repos:
 ## 10. 参考
 
 - 当前通用设计：[agent-skills/WORKTREE.md](../../WORKTREE.md)
+- 当前 retention/gc 规则与实现：[WORKTREE.md §5.1、配置 §5.5](../../WORKTREE.md)，[tasks.py 的 gc_candidates/cmd_gc](../../engine/worktree/tasks.py)
 - 当前决策记录：[agent-skills/DECISIONS.md](../../DECISIONS.md)
 - Git worktree 官方文档：[git-worktree](https://git-scm.com/docs/git-worktree)
 - Codex 托管 worktree 数量与快照回收：[Codex Worktrees](https://learn.chatgpt.com/docs/environments/git-worktrees)
