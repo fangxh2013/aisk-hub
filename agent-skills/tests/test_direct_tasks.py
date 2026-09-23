@@ -503,6 +503,44 @@ class DirectTaskTests(unittest.TestCase):
         self.assertIn("direct-finish", git_cwd_denied)
         self.assertIsNone(finish)
 
+    def test_editing_unrelated_file_from_inside_a_direct_repo_cwd_is_not_misattributed(self):
+        """2026-09-23 实测：cwd 在 direct 仓库里编辑一个完全无关的文件（例如
+        ~/.claude/settings.json）被误判成对该仓库的写入而拒绝——`direct_repo_context`
+        当时把 cwd 当成候选之一，且排在声明路径之前，命中即返回，从没检查过目标路径
+        是否真的落在该仓库内。声明了 `file_path` 的工具（Edit/Write）必须只认目标路径，
+        不认 cwd。这里刻意不创建任何 direct 任务/租约，证明这条路径完全不经过租约判断。"""
+        repo = self.cfg.repo("docs").path
+        unrelated = self.root / "outside-any-repo.txt"
+        unrelated.write_text("pre-existing\n", encoding="utf-8")
+        payload = {
+            "tool_name": "edit",
+            "cwd": str(repo),
+            "tool_input": {"file_path": str(unrelated), "content": "updated"},
+        }
+        with patch("engine.worktree.guards.config.load_config", return_value=(self.cfg, "test profile")):
+            self.assertIsNone(guards.evaluate(payload, "claude"))
+
+    def test_direct_host_shell_read_chain_is_evaluated_segment_by_segment(self):
+        """2026-09-23 实测：`git status && echo x && git branch -a && git log --oneline -5`
+        这类纯只读诊断链被整体拒绝——旧版 `_direct_shell_is_safe_read` 要求"恰好一个
+        simple segment"，任何 `&&`/`;` 组合都直接判定为不安全，不管每一段本身是否安全。
+        `echo` 当时也不在白名单里，单独一条 `echo hello` 都会被拒。这里验证：每段独立
+        判断只读，链式命令才放行；只要有一段不安全（如 `rm`），整条命令仍必须整体拒绝
+        （PreToolUse 是执行前的整体拦截，没有"放行一半"这回事）。"""
+        self.new_task()
+        repo = self.cfg.repo("docs").path
+        with patch("engine.worktree.guards.config.load_config", return_value=(self.cfg, "test profile")):
+            chain = guards.evaluate({"tool_name": "bash", "cwd": str(repo), "tool_input": {
+                "command": "git status --short --branch && echo hello && git branch -a && git log --oneline -3"}},
+                "claude")
+            solo_echo = guards.evaluate({"tool_name": "bash", "cwd": str(repo),
+                                         "tool_input": {"command": "echo hello"}}, "claude")
+            mixed_with_write = guards.evaluate({"tool_name": "bash", "cwd": str(repo), "tool_input": {
+                "command": "git status --short && rm -rf docs-plan.md"}}, "claude")
+        self.assertIsNone(chain)
+        self.assertIsNone(solo_echo)
+        self.assertIn("direct-finish", mixed_with_write)
+
     def test_legacy_promote_refuses_all_direct_repositories(self):
         rc = self.cfg.repo("docs")
         with self.assertRaisesRegex(integrate.Reject, "direct-finish"):

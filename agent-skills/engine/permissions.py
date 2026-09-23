@@ -116,7 +116,10 @@ def apply_claude(dry_run=False):
     n, msg = _merge_json_allow(path, lambda v: f"Bash({v})", dry_run)
     if n is None:
         return PermissionResult("claude", "skip", msg, path)
-    return PermissionResult("claude", "ok", msg, path, n)
+    hook_n, hook_msg = _merge_outside_task_guard_hook(path, "claude", dry_run)
+    if hook_n is None:
+        return PermissionResult("claude", "skip", f"{msg}；{hook_msg}", path, n)
+    return PermissionResult("claude", "ok", f"{msg}；{hook_msg}", path, n + hook_n)
 
 
 def apply_cursor(dry_run=False):
@@ -241,13 +244,22 @@ def _workbuddy_cli_path():
     return str(candidate)
 
 
-def _merge_workbuddy_guard_hook(path, dry_run=False):
+def _merge_outside_task_guard_hook(path, tool, dry_run=False):
     """把任务外高风险动作守卫并入 user 级 PreToolUse hooks。
 
-    这是 C 方案能覆盖「任意目录原始 git push」的必要安装步骤：项目级 hooks 只存在于
+    这是覆盖「任意目录原始 git push」的必要安装步骤：项目级 hooks 只存在于
     aisk 任务目录，离开任务目录就没有 `guards.py` 进程；user 级 hook 才能让
     `evaluate(..., task_root=None)` 在所有项目中看到这次调用。只追加自己的精确命令，
-    不覆盖用户已有 hooks。"""
+    不覆盖用户已有 hooks。
+
+    2026-09-23 从 WorkBuddy 专用改为通用：实测 Claude/Codex 在任务目录外直接
+    `git push origin dev` 完全不弹窗——因为这个函数原来只给 WorkBuddy 装，
+    `guards.evaluate()` 里 `confirm_outside_high_risk` 那段逻辑其实四个工具
+    （codex/claude/antigravity/workbuddy，见 `OUTSIDE_CONFIRM_TOOLS`）都支持，
+    只是没人把调用它的钩子接到 Claude/Codex 头上。`tool` 传精确工具名而不是
+    `auto`——`auto` 是 WorkBuddy 桌面版/AI 版共享一份配置时才需要的运行时探测
+    哨兵，其余工具各自有独立配置文件，直接写死更准确、也更快（少一次探测）。
+    """
     data = {}
     if path.is_file():
         try:
@@ -261,7 +273,7 @@ def _merge_workbuddy_guard_hook(path, dry_run=False):
     if not isinstance(pre, list):
         return None, "hooks.PreToolUse 不是数组，跳过以免覆盖用户配置"
     cli = shlex.quote(_workbuddy_cli_path())
-    command = f"{cli} task guard --tool auto"
+    command = f"{cli} task guard --tool {tool}"
     for group in pre:
         if not isinstance(group, dict):
             continue
@@ -317,7 +329,7 @@ def apply_workbuddy(dry_run=False, tool="workbuddy"):
     n, msg = _merge_json_allow(path, lambda v: f"Bash({v})", dry_run)
     if n is None:
         return PermissionResult(tool, "skip", msg, path)
-    hook_n, hook_msg = _merge_workbuddy_guard_hook(path, dry_run)
+    hook_n, hook_msg = _merge_outside_task_guard_hook(path, "auto", dry_run)
     if hook_n is None:
         return PermissionResult(tool, "skip", f"{msg}；{hook_msg}", path, n)
     return PermissionResult(tool, "ok", f"{msg}；{hook_msg}", path, n + hook_n)

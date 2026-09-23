@@ -322,25 +322,38 @@ def deny_main_write_path(path):
 
 
 def direct_repo_context(normalized):
-    """Resolve one configured direct checkout from the host tool's cwd or paths."""
-    candidates = [normalized.get("cwd") or os.getcwd(), *(normalized.get("paths") or [])]
-    if normalized.get("command"):
-        try:
-            candidates.extend(outside_cwd_candidates(normalized["command"], normalized.get("cwd") or os.getcwd()))
-            tokens = tokenize(normalized["command"])
-            for index, token in enumerate(tokens):
-                value = None
-                if token in ("--git-dir", "--work-tree") and index + 1 < len(tokens):
-                    value = tokens[index + 1]
-                elif token.startswith(("--git-dir=", "--work-tree=")) or token.startswith(("GIT_DIR=", "GIT_WORK_TREE=")):
-                    value = token.split("=", 1)[1]
-                if value:
-                    candidate = Path(os.path.expanduser(value.strip("'\"")))
-                    if not candidate.is_absolute():
-                        candidate = Path(normalized.get("cwd") or os.getcwd()) / candidate
-                    candidates.append(candidate)
-        except Exception:  # noqa: BLE001  malformed shell is handled fail-closed once a direct repo is identified
-            pass
+    """Resolve one configured direct checkout from the host tool's declared write targets.
+
+    File-editing tools (Edit/Write/...) declare explicit `paths`; the repo must be resolved
+    from those alone, never from the session's ambient cwd, otherwise editing a file that has
+    nothing to do with a direct-mode repo gets misattributed to it just because the session
+    happens to be sitting in that repo's directory (e.g. editing `~/.claude/settings.json`
+    while cwd is inside a direct-mode checkout must not be treated as writing to that repo).
+    Shell commands have no declared paths, so cwd — plus any -C/--work-tree/--git-dir target
+    parsed out of the command — remains the only signal available for them.
+    """
+    paths = normalized.get("paths") or []
+    if paths and not normalized.get("command"):
+        candidates = list(paths)
+    else:
+        candidates = [normalized.get("cwd") or os.getcwd(), *paths]
+        if normalized.get("command"):
+            try:
+                candidates.extend(outside_cwd_candidates(normalized["command"], normalized.get("cwd") or os.getcwd()))
+                tokens = tokenize(normalized["command"])
+                for index, token in enumerate(tokens):
+                    value = None
+                    if token in ("--git-dir", "--work-tree") and index + 1 < len(tokens):
+                        value = tokens[index + 1]
+                    elif token.startswith(("--git-dir=", "--work-tree=")) or token.startswith(("GIT_DIR=", "GIT_WORK_TREE=")):
+                        value = token.split("=", 1)[1]
+                    if value:
+                        candidate = Path(os.path.expanduser(value.strip("'\"")))
+                        if not candidate.is_absolute():
+                            candidate = Path(normalized.get("cwd") or os.getcwd()) / candidate
+                        candidates.append(candidate)
+            except Exception:  # noqa: BLE001  malformed shell is handled fail-closed once a direct repo is identified
+                pass
     for candidate in candidates:
         try:
             root = profile_mod.repo_root(candidate)
@@ -397,16 +410,8 @@ def _direct_path_in_scope(raw, cwd, repo, allowed_paths):
         raise Deny(f"direct 任务未声明此写入路径：{rel or '.'}")
 
 
-def _direct_shell_is_safe_read(command, cwd, task_id=None):
-    """Permit narrow read-only shell commands; all shell writes use direct-finish or file tools."""
-    try:
-        tokens = tokenize(command)
-    except ValueError:
-        return False
-    segments = list(split_simple(tokens))
-    if len(segments) != 1 or not segments[0]:
-        return False
-    argv = segments[0]
+def _segment_is_safe_read(argv, task_id=None):
+    """Judge one already-split (no ;/&&/| boundary) argv as a safe read-only command."""
     prog = prog_name(argv[0], set())
     if prog in ("aisk", "xw"):
         rest = list(argv[1:])
@@ -431,8 +436,27 @@ def _direct_shell_is_safe_read(command, cwd, task_id=None):
         return False
     if prog == "find":
         return not any(x in argv for x in ("-delete", "-exec", "-execdir", ">", ">>", "|"))
-    return prog in {"pwd", "ls", "cat", "head", "tail", "wc", "file", "stat", "du", "df", "rg", "grep"} \
+    return prog in {"pwd", "ls", "cat", "head", "tail", "wc", "file", "stat", "du", "df", "rg", "grep", "echo", "cd"} \
         and not any(x in argv for x in (">", ">>", "<", "|"))
+
+
+def _direct_shell_is_safe_read(command, cwd, task_id=None):
+    """Permit narrow read-only shell commands; all shell writes use direct-finish or file tools.
+
+    A `;`/`&&`-joined chain (e.g. `git status && git branch -a && git log`) is safe exactly
+    when every individual segment is independently safe — one unsafe segment anywhere fails
+    the whole command closed, since this is a PreToolUse gate: either every part runs, or none
+    of it does. Requiring a single segment (the previous behavior) rejected purely read-only
+    diagnostic chains just as hard as it rejected a smuggled write.
+    """
+    try:
+        tokens = tokenize(command)
+    except ValueError:
+        return False
+    segments = list(split_simple(tokens))
+    if not segments:
+        return False
+    return all(argv and _segment_is_safe_read(argv, task_id) for argv in segments)
 
 
 def direct_checkout_guard(normalized):
