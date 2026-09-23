@@ -9,7 +9,6 @@ import io
 import json
 import os
 import shlex
-import subprocess
 import sys
 import tempfile
 import time
@@ -1298,17 +1297,12 @@ class GuardsAndHooks(Sandbox):
 
 
 class BindAndCli(Sandbox):
-    def test_windows_dialog_uses_native_backend_and_tool_title(self):
-        ctx = registry.ActionContext("workbuddy", "git推送", task_id="T009", repository="backend")
-        result = subprocess.CompletedProcess(["powershell.exe"], 0, "", "")
-        with patch.object(registry, "IS_WIN", True), \
-             patch.object(registry.shutil, "which", return_value="powershell.exe"), \
-             patch.object(registry.subprocess, "run", return_value=result) as run:
-            self.assertTrue(registry.confirm_human("发布任务分支", "确认推送", context=ctx))
-        argv = run.call_args.args[0]
-        self.assertIn("-STA", argv)
-        self.assertIn("AISKHUB_DIALOG_TITLE", run.call_args.kwargs["env"])
-        self.assertEqual(run.call_args.kwargs["env"]["AISKHUB_DIALOG_TITLE"], "git推送-workbuddy | T009 | backend")
+    # 2026-09-23：Windows 弹窗后端已从 PowerShell WinForms 换成原生 TaskDialog
+    # （ctypes 调 comctl32），旧的 WinForms 用例测的机制已经从 registry.confirm_human
+    # 里删掉（合入 Windows 原生确认弹窗支持时确认过：新代码路径下旧分支永不可达，
+    # 是死代码）。等价覆盖在 test_action_context.py 的
+    # test_windows_task_dialog_names_the_action_and_defaults_to_cancel 里，走的是
+    # 真实生效的 ctypes 路径，不需要在这里重复一份测已删代码的用例。
 
     def test_windows_publish_is_confirmed_and_never_force_pushes(self):
         self.prof["worktrees"]["hub"] = str(self.root / "hub")
