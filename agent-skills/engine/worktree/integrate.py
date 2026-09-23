@@ -265,8 +265,15 @@ def plan_landing(cfg: WtConfig, reg: Registry, task, alias, from_hub):
         )
     if git.current_branch(repo) != cfg.integration:
         raise Reject(f"主工作区不在 {cfg.integration}")
-    if git.dirty(repo):
-        raise Reject("主工作区有未提交改动，等它提交后再 land")
+    dirty = git.dirty_paths(repo)
+    if dirty:
+        # 只拦「脏文件与本次落地内容相交」——主工作区几乎总有点无关的草稿/本地配置，
+        # 逐个字节都要求干净只会把交付链堵死在一个和落地无关的文件上。真正的保护在后面：
+        # merge --ff-only 本身拒绝覆盖本地修改，:394 处的门禁通过后复检也按同样口径重查。
+        clash = sorted(set(dirty) & set(git.diff_names(repo, head, tip)))
+        if clash:
+            raise Reject(f"主工作区这些文件与本次落地内容冲突，请先提交或还原：{'、'.join(clash[:15])}")
+        say("warn", f"{alias}: 主工作区有 {len(dirty)} 个无关未提交文件，本次落地不碰它们")
     probs = report_audit(audit_branch(cfg, reg, alias, repo, cfg.integration, strict=False))
     if probs:
         raise Reject("；".join(probs))
@@ -391,8 +398,14 @@ def cmd_land(cfg, reg, args):
                         blocked[alias] = "门禁期间主工作区切换了分支"
                     elif git.sha(repo, cfg.integration) != p["head"]:
                         blocked[alias] = f"门禁期间 {cfg.integration} 前进了，请重新 land"
-                    elif git.dirty(repo):
-                        blocked[alias] = "主工作区出现未提交改动，请稍后重新 land"
+                    else:
+                        # 和 plan_landing 同一口径：只拦新冒出来的、与本次落地内容相交的改动。
+                        # 按原样查「是否有任何脏文件」会把 plan_landing 已经放行的无关草稿
+                        # 在这里重新挡一次，等于门禁收窄白做——TOCTOU 防护要护住的是
+                        # 「这段时间内容变了」，不是「工作区从始至终有点无关的东西」。
+                        clash = sorted(set(git.dirty_paths(repo)) & set(p["changed"]))
+                        if clash:
+                            blocked[alias] = f"门禁期间主工作区这些文件出现冲突改动，请先处理：{'、'.join(clash[:15])}"
                     if alias in blocked:
                         say("err", f"{alias}: {blocked[alias]}")
                         continue
