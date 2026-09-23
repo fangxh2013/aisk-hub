@@ -7,7 +7,11 @@
 from __future__ import annotations
 
 import contextlib
+import json
+import os
 import re
+import subprocess
+import time
 from pathlib import Path
 
 from . import actor, gates, gitops as git, model, names, registry, tasks
@@ -97,10 +101,25 @@ def action_context(args, action, task_id="", summary="", repository=""):
 
 
 def reject_main_target(cfg: WtConfig, *branches):
+    # main is an unconditional, non-configurable no-write target. Keep master on
+    # the existing project policy path; the two branches intentionally differ.
+    def branch_name(value):
+        name = str(value or "").strip().lower().split(":")[-1]
+        prefixes = ("refs/heads/", "refs/remotes/", "origin/", "mac/")
+        while True:
+            prefix = next((p for p in prefixes if name.startswith(p)), None)
+            if not prefix:
+                break
+            name = name[len(prefix):]
+        return name
+
+    blocked_main = [str(b) for b in branches if branch_name(b) == "main"]
+    if blocked_main:
+        raise Reject(f"禁止通过 aisk task 修改 main：{'、'.join(blocked_main)}；该限制不可配置或确认解除。")
     if main_operations_forbidden(cfg):
-        blocked = [b for b in branches if str(b).lower() in MANUAL_ONLY_BRANCHES]
-        if blocked:
-            raise Reject(f"禁止通过 aisk task 自动操作 {'、'.join(blocked)}；main/master 只能由本人手工处理。")
+        blocked_master = [str(b) for b in branches if branch_name(b) == "master"]
+        if blocked_master:
+            raise Reject(f"禁止通过 aisk task 自动操作 {'、'.join(blocked_master)}；master 仍受项目策略约束。")
 
 
 def landing_prompt(tid, title, target, plans, blocked=None):
@@ -157,6 +176,167 @@ def fetch_task_refs(cfg: WtConfig, alias, repo):
 
 def ff_anchor_re(cfg: WtConfig):
     return re.compile(rf"^merge (origin/\S+|{re.escape(cfg.integration)}|[0-9a-f]{{7,40}}): Fast-forward$")
+
+
+def ff_compare_and_swap(repo, branch, expected_old, candidate, *, journal_path=None,
+                        preserve_journal_on_failure=False):
+    """Safely fast-forward a checked-out branch with a real expected-old CAS.
+
+    ``update-ref --stdin`` prepares the branch ref transaction first, which
+    verifies and locks the exact old object id. While that lock is held,
+    ``read-tree -m -u`` performs Git's normal index/worktree safety checks and
+    updates only paths changed by the fast-forward. The ref transaction is
+    committed only after that succeeds. This avoids the check-then-merge race
+    without using ``reset --hard`` or discarding unrelated staged changes.
+    """
+    branch = str(branch or "")
+    ref = f"refs/heads/{branch}"
+    if not branch or not git.ok(["check-ref-format", ref], cwd=repo):
+        raise Reject(f"无效的集成分支引用：{branch!r}")
+    if not re.fullmatch(r"[0-9a-fA-F]{40,64}", str(expected_old or "")):
+        raise Reject("CAS 缺少有效的预期旧提交")
+    if not re.fullmatch(r"[0-9a-fA-F]{40,64}", str(candidate or "")):
+        raise Reject("CAS 缺少有效的候选提交")
+    if git.current_branch(repo) != branch:
+        raise Reject(f"主工作区不在 {branch}")
+    if not git.is_ancestor(repo, expected_old, candidate):
+        raise Reject(f"候选提交不是 {branch} 的快进提交")
+
+    journal = Path(journal_path) if journal_path else None
+    journal_data = {"version": 1, "branch": branch, "expected_old": expected_old, "candidate": candidate}
+    if journal and journal.exists():
+        try:
+            existing = json.loads(journal.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise Reject(f"{branch} 落地恢复记录损坏；保留现场并停止：{journal}") from exc
+        if existing != journal_data:
+            raise Reject(f"{branch} 存在另一笔未恢复的落地事务；先运行恢复检查：{journal}")
+    elif journal:
+        registry.atomic_json(journal, journal_data)
+
+    git_dir_lock = Path(git.out(["rev-parse", "--git-path", f"{ref}.lock"], cwd=repo))
+    if not git_dir_lock.is_absolute():
+        git_dir_lock = Path(repo) / git_dir_lock
+    env = os.environ.copy()
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        env.pop(key, None)
+    env["LC_ALL"] = "C"
+    env["LANGUAGE"] = "C"
+    command = [git.git_exe(), "-c", "core.quotepath=false", "update-ref", "--stdin",
+               "-m", f"merge {branch}: Fast-forward"]
+    process = subprocess.Popen(command, cwd=str(repo), env=env, stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                               encoding="utf-8", errors="replace", bufsize=1)
+
+    def collect(timeout=None):
+        if process.stdin and not process.stdin.closed:
+            process.stdin.close()
+        code = process.wait(timeout=timeout)
+        stdout, stderr = process.stdout.read(), process.stderr.read()
+        process.stdout.close()
+        process.stderr.close()
+        return stdout, stderr, code
+
+    prepared = False
+    tree_updated = False
+    try:
+        process.stdin.write(f"start\nupdate {ref} {candidate} {expected_old}\nprepare\n")
+        process.stdin.flush()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                stdout, stderr, _ = collect()
+                detail = (stderr or stdout).strip()[-300:]
+                raise Reject(f"{branch} CAS 失败（预期仍为 {expected_old[:9]}）：{detail}")
+            try:
+                if git_dir_lock.read_text(encoding="ascii").strip() == candidate:
+                    prepared = True
+                    break
+            except (FileNotFoundError, OSError, UnicodeError):
+                pass
+            time.sleep(0.01)
+        if not prepared:
+            process.stdin.write("abort\n")
+            process.stdin.flush()
+            process.stdin.close()
+            stdout, stderr, _ = collect()
+            if journal and not preserve_journal_on_failure:
+                journal.unlink(missing_ok=True)
+            raise Reject(f"{branch} CAS 准备超时；未移动分支引用。{(stderr or stdout).strip()[-200:]}")
+
+        tree_update = git.run(["read-tree", "-m", "-u", expected_old, candidate], cwd=repo, check=False)
+        if tree_update.returncode != 0:
+            process.stdin.write("abort\n")
+            process.stdin.flush()
+            process.stdin.close()
+            stdout, stderr, _ = collect()
+            detail = (tree_update.stderr or stderr or stdout).strip()[-300:]
+            if journal and not preserve_journal_on_failure:
+                journal.unlink(missing_ok=True)
+            raise Reject(f"{branch} 工作区无法安全快进，引用保持不变：{detail}")
+        tree_updated = True
+
+        process.stdin.write("commit\n")
+        process.stdin.flush()
+        process.stdin.close()
+        stdout, stderr, returncode = collect()
+        if returncode != 0:
+            actual = git.sha(repo, ref)
+            raise Reject(f"{branch} CAS 提交失败（当前 {str(actual)[:9]}，预期 {candidate[:9]}）："
+                         f"{(stderr or stdout).strip()[-300:]}")
+    except Exception:
+        if process.poll() is None:
+            try:
+                process.stdin.write("abort\n")
+                process.stdin.flush()
+                process.stdin.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+            try:
+                collect(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                collect()
+        if journal and not tree_updated and not preserve_journal_on_failure:
+            journal.unlink(missing_ok=True)
+        raise
+    actual = git.sha(repo, ref)
+    if actual != candidate:
+        raise Reject(f"{branch} 快进完成后引用不是候选提交：{str(actual)[:9]} != {candidate[:9]}")
+    if journal:
+        journal.unlink(missing_ok=True)
+    return actual
+
+
+def land_cas_journal_path(cfg, alias):
+    return cfg.state_dir / "land-cas" / f"{alias}.json"
+
+
+def recover_land_cas(repo, branch, journal_path):
+    """Resume or retire a prior fast-forward interrupted around index/ref commit."""
+    journal = Path(journal_path)
+    if not journal.exists():
+        return False
+    try:
+        data = json.loads(journal.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise Reject(f"{branch} 落地恢复记录不可读；不会改动工作区：{journal}") from exc
+    if (not isinstance(data, dict) or data.get("version") != 1 or data.get("branch") != branch
+            or not re.fullmatch(r"[0-9a-fA-F]{40,64}", str(data.get("expected_old") or ""))
+            or not re.fullmatch(r"[0-9a-fA-F]{40,64}", str(data.get("candidate") or ""))):
+        raise Reject(f"{branch} 落地恢复记录与当前操作不匹配；不会改动工作区：{journal}")
+    if git.current_branch(repo) != branch:
+        raise Reject(f"{branch} 落地事务中断后当前工作区已切换分支；保留恢复记录：{journal}")
+    current = git.sha(repo, f"refs/heads/{branch}")
+    if current == data["candidate"]:
+        # The ref transaction committed only after read-tree completed.
+        journal.unlink(missing_ok=True)
+        return True
+    if current != data["expected_old"]:
+        raise Reject(f"{branch} 落地事务中断后引用已再次变化；保留恢复记录：{journal}")
+    ff_compare_and_swap(repo, branch, data["expected_old"], data["candidate"], journal_path=journal,
+                        preserve_journal_on_failure=True)
+    return True
 
 
 # ------------------------------------------------------------------ 来源审计
@@ -361,6 +541,10 @@ def cmd_land(cfg, reg, args):
         if task["state"] != "queued" and not dry:
             reg.set_state(task, "queued")
         try:
+            if not dry:
+                for a in aliases:
+                    repo = integration_repo(cfg, a)
+                    recover_land_cas(repo, cfg.integration, land_cas_journal_path(cfg, a))
             if from_hub:
                 for a in aliases:
                     fetch_task_refs(cfg, a, integration_repo(cfg, a))
@@ -439,7 +623,8 @@ def cmd_land(cfg, reg, args):
                     if alias in blocked:
                         say("err", f"{alias}: {blocked[alias]}")
                         continue
-                    git.run(["merge", "--ff-only", p["cand"]], cwd=repo)
+                    ff_compare_and_swap(repo, cfg.integration, p["head"], p["cand"],
+                                        journal_path=land_cas_journal_path(cfg, alias))
                     r["landed_sha"] = p["cand"]
                     say("ok", f"{alias}: {cfg.integration} 快进到 {p['cand'][:9]}")
                 elif p["tip"] != r.get("base_sha"):
@@ -479,6 +664,88 @@ def cmd_land(cfg, reg, args):
             raise
 
 
+def land_automatic(cfg, reg, task, alias):
+    """Automatically land one ready Xinhua BE/FE task into local fxh.
+
+    This path has no confirmation dialog and has no promote/dev/push step.
+    It is intentionally restricted to the two approved task-worktree repos,
+    one repository per task, and fails closed on sensitive paths.
+    """
+    tid = str((task or {}).get("id") or "")
+    if not tid:
+        raise Reject("自动落地缺少任务编号")
+    if alias not in ("be", "web"):
+        raise Reject("自动落地仅适用于新华后端 be 与前端 web 仓库")
+    _personal_delivery_config(cfg, alias)
+    rc = cfg.repo(alias)
+    if rc.promote != "ff-trunk":
+        raise Reject(f"{alias} 不是前后端 fxh→dev 交付配置")
+    if getattr(rc, "workspace_mode", "task-worktree") != "task-worktree":
+        raise Reject(f"{alias} 未配置为独立 worktree 仓库，拒绝自动落地")
+
+    with file_lock(cfg.locks_dir / f"land-{alias}.lock", wait_msg=f"{alias} 有落地/上主干正在进行，排队"):
+        current = reg.load(tid)
+        if current.get("state") not in ("ready", "queued", "rejected"):
+            raise Reject(f"任务状态 {current.get('state')}，自动落地要求 ready")
+        if list(current.get("repos", {})) != [alias]:
+            raise Reject("自动落地要求任务只包含本次指定的一个仓库")
+        tasks.require_local(cfg, current, ("ready", "queued", "rejected"))
+        if cfg.os != "mac" or cfg.integration != "fxh":
+            raise Reject("自动落地仅允许在 mac 集成面写入 fxh")
+        if current.get("base_task"):
+            parent = reg.load(current["base_task"])
+            if parent.get("state") not in ("landed", "promoted", "verified", "archived"):
+                raise Reject(f"父任务 {parent['id']} 尚未落地")
+        if current["state"] != "queued":
+            reg.set_state(current, "queued")
+
+        repo = integration_repo(cfg, alias)
+        try:
+            recover_land_cas(repo, "fxh", land_cas_journal_path(cfg, alias))
+            plan = plan_landing(cfg, reg, current, alias, from_hub=False)
+            if plan.get("sensitive"):
+                raise Reject("自动落地涉及敏感路径，必须转人工处理：" + "、".join(plan["sensitive"][:12]))
+            if plan["status"] == "candidate":
+                log = cfg.logs_dir / current["id"] / f"land-auto-{alias}-{stamp()}.log"
+                gate = gate_prepare(cfg, alias, plan["cand"])
+                ok, summary = gates.run_gate(cfg, alias, gate, plan["changed"], log, clean=True)
+                if not ok:
+                    if log.exists():
+                        print(gates.tail(log))
+                    raise Reject(f"自动落地门禁失败——{summary}（{log}）")
+                if git.current_branch(repo) != "fxh":
+                    raise Reject("门禁期间主工作区切换了分支")
+                if git.sha(repo, "fxh") != plan["head"]:
+                    raise Reject("门禁期间 fxh 前进了，请重新 land")
+                clash = sorted(set(git.dirty_paths(repo)) & set(plan["changed"]))
+                if clash:
+                    raise Reject("门禁期间主工作区出现冲突改动：" + "、".join(clash[:15]))
+                ff_compare_and_swap(repo, "fxh", plan["head"], plan["cand"],
+                                    journal_path=land_cas_journal_path(cfg, alias))
+                current["repos"][alias]["landed_sha"] = plan["cand"]
+                say("ok", f"{alias}: fxh 快进到 {plan['cand'][:9]}（自动落地）")
+            else:
+                tip = plan["tip"]
+                if tip != current["repos"][alias].get("ready_sha") or not git.is_ancestor(repo, tip, "fxh"):
+                    raise Reject("fxh 已包含候选的判断与 ready SHA 不一致；拒绝补写落地状态")
+                # A fast-forward has no merge commit to discover. Recording
+                # the ready tip is also what makes replay after a crash between
+                # CAS and task-state persistence idempotent.
+                current["repos"][alias]["landed_sha"] = (
+                    current["repos"][alias].get("landed_sha") or tip)
+
+            reg.save(current)
+            record_refs(reg, alias, repo, ["fxh"])
+            current["owner"] = None
+            reg.set_state(current, "landed", note=f"{alias}@{(current['repos'][alias].get('landed_sha') or plan.get('tip') or '')[:9]}")
+            tasks.refresh_board(cfg, reg)
+            return 0
+        except WtError as exc:
+            current["last_reject"] = {"at": now_iso(), "reason": str(exc)}
+            reg.set_state(current, "rejected", note=str(exc)[:500])
+            raise
+
+
 # ------------------------------------------------------------------ promote
 def pending(repo, rng):
     return git.out(["log", "--oneline", "--no-decorate", *rng.split()], cwd=repo).splitlines()
@@ -502,6 +769,208 @@ def required_promotion_task_id(reg, args, alias, repo, head):
     return task_id
 
 
+def _personal_delivery_config(cfg, alias):
+    """Validate the Xinhua personal-publish route before any Git side effect."""
+    rc = cfg.repo(alias)
+    reject_main_target(cfg, cfg.integration, rc.push_branch, rc.trunk)
+    automatic = getattr(rc, "automatic", {}) or {}
+    if (getattr(cfg, "profile_name", "") != "xinhua" or alias not in ("be", "web")
+            or rc.workspace_mode != "task-worktree" or cfg.integration != "fxh"
+            or rc.trunk != "dev" or rc.push_branch != "fxh-dev"
+            or automatic.get("commit_task_branch") is not True
+            or automatic.get("land_to_local") != "fxh"
+            or automatic.get("push_only") != "fxh-dev"):
+        raise Reject(f"{alias} 不是 fxh → fxh-dev/dev 前后端交付配置；拒绝复用个人推送流程")
+    return rc
+
+
+def _validate_xinhua_origin(cfg, alias, repo):
+    """Require the exact profile fetch and push origin before separated routes act."""
+    rc = _personal_delivery_config(cfg, alias)
+    expected = (rc.automatic or {}).get("expected_origin_url")
+    if not isinstance(expected, str) or not expected or expected != expected.strip():
+        raise Reject(f"xinhua.{alias} 必须显式配置 automatic.expected_origin_url")
+
+    def config_values(key):
+        result = git.run(["config", "--local", "--get-all", key], cwd=repo, check=False)
+        if result.returncode == 1 and not (result.stdout or "").strip():
+            return []
+        if result.returncode != 0:
+            raise Reject(f"无法读取 {alias} 的 Git 远端配置；拒绝继续")
+        return [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+
+    fetch_config = config_values("remote.origin.url")
+    push_config = config_values("remote.origin.pushurl")
+    if fetch_config != [expected] or (push_config and push_config != [expected]):
+        raise Reject(f"{alias} origin 配置与 xinhua.{alias} 档案 expected_origin_url 不匹配")
+
+    fetch = git.run(["remote", "get-url", "--all", "origin"], cwd=repo, check=False)
+    push = git.run(["remote", "get-url", "--push", "--all", "origin"], cwd=repo, check=False)
+    if fetch.returncode != 0 or push.returncode != 0:
+        raise Reject(f"无法解析 {alias} origin 的 fetch/push 地址；拒绝继续")
+    fetch_urls = [line.strip() for line in (fetch.stdout or "").splitlines() if line.strip()]
+    push_urls = [line.strip() for line in (push.stdout or "").splitlines() if line.strip()]
+    if fetch_urls != [expected] or push_urls != [expected]:
+        raise Reject(f"{alias} origin fetch/push 地址必须唯一且匹配档案 expected_origin_url")
+    mirror = config_values("remote.origin.mirror")
+    if any(value.lower() in {"1", "true", "yes", "on"} for value in mirror):
+        raise Reject(f"{alias} origin mirror 模式禁止 separated delivery 操作")
+
+
+def publish_personal_branch(cfg, reg, alias, args=None, *, dry=False):
+    """Run only the personal fxh → fxh-dev publish step; never merge or push dev.
+
+    This is deliberately separate from ``promote_one``: callers that want the
+    personal branch update can invoke this operation without entering the
+    legacy combined personal-push/dev-push flow.
+    """
+    _validate_xinhua_origin(cfg, alias, integration_repo(cfg, alias))
+    repo = integration_repo(cfg, alias)
+    with file_lock(cfg.locks_dir / f"land-{alias}.lock", wait_msg=f"{alias} 有落地正在进行，排队"):
+        fetched = git.run(["fetch", "origin", "--prune"], cwd=repo, check=False)
+        if fetched.returncode != 0:
+            raise Reject(f"fetch origin 失败：{fetched.stderr.strip()[-300:]}")
+        if git.current_branch(repo) != "fxh":
+            raise Reject(f"主工作区不在 fxh：{repo}")
+        found = audit_branch(cfg, reg, alias, repo, "fxh", strict=False)
+        problems = report_audit(found)
+        if problems:
+            raise Reject("；".join(problems))
+        head = git.sha(repo, "fxh")
+        if not head:
+            raise Reject(f"{alias} 找不到本地 fxh 提交")
+
+        remote = git.sha(repo, "origin/fxh-dev")
+        if remote and not git.is_ancestor(repo, remote, head):
+            raise Reject("本地 fxh 与 origin/fxh-dev 已分叉；拒绝改写个人远端分支")
+        commits = pending(repo, f"origin/fxh-dev..{head}") if remote else pending(repo, f"-20 {head}")
+        if not commits:
+            say("info", f"{alias}: origin/fxh-dev 已是最新")
+            return 0
+        summary = f"{alias}：fxh → origin/fxh-dev，仅推送个人分支，不合并或推送 dev；{len(commits)} 个提交：\n" + "\n".join(commits[:25])
+        print(summary)
+        if dry:
+            say("info", "（dry-run 不推送）")
+            return 0
+
+        gate = gate_prepare(cfg, alias, head)
+        log = cfg.logs_dir / "promote" / f"personal-{alias}-{stamp()}.log"
+        base = remote or git.out(["hash-object", "-t", "tree", "--stdin"], cwd=repo, input_text="")
+        changed = git.diff_names(repo, base, head)
+        ok, gate_summary = gates.run_gate(cfg, alias, gate, changed, log, clean=True)
+        if not ok:
+            if log.exists():
+                print(gates.tail(log))
+            raise Reject(f"个人分支推送前门禁失败：{gate_summary}（{log}）")
+        if git.sha(repo, "fxh") != head:
+            raise Reject("门禁期间 fxh 引用发生变化，请重新发布")
+
+        if push_requires_confirmation(cfg, alias, "fxh-dev"):
+            task_id = required_promotion_task_id(reg, args, alias, repo, head)
+            if not registry.confirm_human(
+                    summary, _push_expect(args),
+                    context=action_context(args, "git推送", task_id, summary,
+                                           repository=_repository_label_for_workbuddy(args, repo))):
+                raise Reject("未确认推送 fxh-dev，停止")
+        # Explicit refspec is the entire mutation surface of this operation.
+        _validate_xinhua_origin(cfg, alias, repo)
+        git.run(["push", "origin", f"{head}:refs/heads/fxh-dev"], cwd=repo)
+        say("ok", f"已推送 origin/fxh-dev（仅个人分支）")
+        return 0
+
+
+def merge_integration_to_local_dev(cfg, reg, alias, args=None, *, dry=False):
+    """Confirm and fast-forward the local dev anchor from fxh; this never pushes."""
+    _personal_delivery_config(cfg, alias)
+    repo = integration_repo(cfg, alias)
+    anchor = cfg.anchor_path(alias, "dev")
+    _validate_xinhua_origin(cfg, alias, repo)
+    _validate_xinhua_origin(cfg, alias, anchor)
+    with file_lock(cfg.locks_dir / f"land-{alias}.lock", wait_msg=f"{alias} 有落地/推送正在进行，排队"):
+        if not anchor.exists() or git.current_branch(anchor) != "dev":
+            raise Reject(f"本地 dev 锚点不存在或分支错误：{anchor}")
+        if git.dirty(anchor):
+            raise Reject(f"本地 dev 锚点有未提交改动：{anchor}")
+        if git.current_branch(repo) != "fxh":
+            raise Reject(f"主工作区不在 fxh：{repo}")
+        old_dev = git.sha(anchor, "refs/heads/dev")
+        fxh = git.sha(repo, "refs/heads/fxh")
+        if not old_dev or not fxh:
+            raise Reject("找不到本地 dev 或 fxh 提交")
+        if old_dev == fxh:
+            say("info", f"{alias}: 本地 dev 已包含全部 fxh 提交")
+            return 0
+        if not git.is_ancestor(repo, old_dev, fxh):
+            raise Reject("本地 dev 无法快进到 fxh；先核对分叉提交，不会自动解冲突")
+        commits = pending(repo, f"{old_dev}..{fxh}")
+        prompt = f"{alias}：确认将本地 fxh 快进合并到本地 dev（不推送），{len(commits)} 个提交：\n" + "\n".join(commits[:25])
+        print(prompt)
+        if dry:
+            say("info", "（dry-run 需要操作者确认；未修改本地 dev）")
+            return 0
+        task_id = required_promotion_task_id(reg, args, alias, repo, fxh)
+        if not registry.confirm_human(prompt, "落地", context=action_context(args, "git合并", task_id, prompt)):
+            raise Reject("未确认合并本地 dev，分支保持不变")
+        if git.current_branch(anchor) != "dev" or git.dirty(anchor):
+            raise Reject("确认期间本地 dev 锚点切换或出现未提交改动")
+        if git.sha(anchor, "refs/heads/dev") != old_dev or git.sha(repo, "refs/heads/fxh") != fxh:
+            raise Reject("确认期间本地 dev 或 fxh 已变化，请重新执行")
+        git.run(["merge", "--ff-only", fxh], cwd=anchor)
+        if git.sha(anchor, "refs/heads/dev") != fxh:
+            raise Reject("本地 dev 快进结果与确认时 fxh 不一致")
+        record_refs(reg, alias, repo, ["dev", "fxh"])
+        say("ok", f"{alias}: 本地 dev 已快进到 fxh（未推送）")
+        return 0
+
+
+def push_local_dev(cfg, reg, alias, args=None, *, dry=False):
+    """Confirm and push local dev; this operation never merges fxh into dev."""
+    _personal_delivery_config(cfg, alias)
+    repo = integration_repo(cfg, alias)
+    anchor = cfg.anchor_path(alias, "dev")
+    _validate_xinhua_origin(cfg, alias, repo)
+    _validate_xinhua_origin(cfg, alias, anchor)
+    with file_lock(cfg.locks_dir / f"land-{alias}.lock", wait_msg=f"{alias} 有落地/推送正在进行，排队"):
+        if not anchor.exists() or git.current_branch(anchor) != "dev":
+            raise Reject(f"本地 dev 锚点不存在或分支错误：{anchor}")
+        if git.dirty(anchor):
+            raise Reject(f"本地 dev 锚点有未提交改动：{anchor}")
+        fetched = git.run(["fetch", "origin", "refs/heads/dev:refs/remotes/origin/dev"], cwd=repo, check=False)
+        if fetched.returncode != 0:
+            raise Reject(f"fetch origin/dev 失败：{fetched.stderr.strip()[-300:]}")
+        remote_dev = git.sha(repo, "refs/remotes/origin/dev")
+        local_dev = git.sha(anchor, "refs/heads/dev")
+        if not remote_dev or not local_dev:
+            raise Reject("找不到 origin/dev 或本地 dev 提交")
+        if local_dev == remote_dev:
+            say("info", f"{alias}: origin/dev 已是最新")
+            return 0
+        if not git.is_ancestor(repo, remote_dev, local_dev):
+            raise Reject("本地 dev 与 origin/dev 已分叉；拒绝推送")
+        commits = pending(repo, f"{remote_dev}..{local_dev}")
+        prompt = f"{alias}：确认推送本地 dev → origin/dev，{len(commits)} 个提交：\n" + "\n".join(commits[:25])
+        print(prompt)
+        if dry:
+            say("info", "（dry-run 不推送）")
+            return 0
+        task_id = required_promotion_task_id(reg, args, alias, repo, local_dev)
+        if not registry.confirm_human(
+                prompt, _push_expect(args),
+                context=action_context(args, "git推送", task_id, prompt,
+                                       repository=_repository_label_for_workbuddy(args, anchor))):
+            raise Reject("未确认推送 dev，停止")
+        if git.current_branch(anchor) != "dev" or git.dirty(anchor):
+            raise Reject("确认期间本地 dev 锚点切换或出现未提交改动")
+        if git.sha(anchor, "refs/heads/dev") != local_dev or git.sha(repo, "refs/remotes/origin/dev") != remote_dev:
+            raise Reject("确认期间本地 dev 或 origin/dev 已变化，请重新执行")
+        _validate_xinhua_origin(cfg, alias, repo)
+        _validate_xinhua_origin(cfg, alias, anchor)
+        git.run(["push", "origin", "refs/heads/dev:refs/heads/dev"], cwd=anchor)
+        say("ok", f"{alias}: 已推送 origin/dev")
+        record_refs(reg, alias, repo, ["dev", "fxh"])
+        return 0
+
+
 def cmd_promote(cfg, reg, args):
     if cfg.os == "windows" and not cfg.windows_integration:
         raise WtError("promote 默认只在 mac 集成面执行；Windows 请显式配置 worktrees.windows_integration")
@@ -509,6 +978,10 @@ def cmd_promote(cfg, reg, args):
     rc_all = 0
     for alias in aliases:
         rc = cfg.repo(alias)
+        if getattr(rc, "workspace_mode", "task-worktree") == "direct":
+            say("err", f"{alias} 使用 direct checkout；promote 不适用，必须由 direct-finish 按任务范围完成")
+            rc_all = 1
+            continue
         repo = integration_repo(cfg, alias)
         if not repo.exists():
             continue
@@ -526,11 +999,17 @@ def cmd_promote(cfg, reg, args):
 
 
 def promote_one(cfg: WtConfig, reg: Registry, alias, rc, dry, args=None):
+    if getattr(rc, "workspace_mode", "task-worktree") == "direct":
+        raise Reject(f"{alias} 使用 direct checkout；promote 禁止绕过 direct-finish 的任务范围与 lease 门禁")
+    personal_only = (getattr(cfg, "profile_name", None) == "xinhua" and alias in ("be", "web")
+                     and cfg.integration == "fxh" and rc.trunk == "dev" and rc.push_branch == "fxh-dev")
     # 只查这个仓库真正会写的分支：push-only（如文档仓库只推 fxh）不碰主干，主干叫 master 也不该被拦。
     # promote 只读取 cfg.integration 的提交引用并写独立 anchor/远端；fxh 主工作区
     # 可以保留用户未提交改动。真正会改写 fxh 文件的 land 仍在提交前做清洁检查。
     reject_main_target(cfg, cfg.integration, rc.push_branch, *([rc.trunk] if rc.promote == "ff-trunk" else []))
     repo = integration_repo(cfg, alias)
+    if personal_only:
+        _validate_xinhua_origin(cfg, alias, repo)
     r = git.run(["fetch", "origin", "--prune"], cwd=repo, check=False)
     if r.returncode != 0:
         raise Reject(f"fetch origin 失败：{r.stderr.strip()[-300:]}")
@@ -544,7 +1023,7 @@ def promote_one(cfg: WtConfig, reg: Registry, alias, rc, dry, args=None):
         raise Reject("；".join(probs))
     head = git.sha(repo, cfg.integration)
 
-    if rc.promote == "ff-trunk":
+    if rc.promote == "ff-trunk" and not personal_only:
         trunk = rc.trunk
         ot = git.sha(repo, f"origin/{trunk}")
         if not ot:
@@ -583,7 +1062,8 @@ def promote_one(cfg: WtConfig, reg: Registry, alias, rc, dry, args=None):
                 say("ok", f"已同步 origin/{trunk} 进 {cfg.integration}（门禁：{summary}）")
 
     if not dry:
-        comparison = git.sha(repo, f"origin/{rc.trunk}") or head
+        comparison_branch = rc.push_branch if personal_only else rc.trunk
+        comparison = git.sha(repo, f"origin/{comparison_branch}") or head
         gate = gate_prepare(cfg, alias, head)
         log = cfg.logs_dir / "promote" / f"check-{alias}-{stamp()}.log"
         ok, summary = gates.run_gate(cfg, alias, gate, git.diff_names(repo, comparison, head), log, clean=True)
@@ -615,6 +1095,8 @@ def promote_one(cfg: WtConfig, reg: Registry, alias, rc, dry, args=None):
                              ),
                          ))
             if confirmed:
+                if personal_only:
+                    _validate_xinhua_origin(cfg, alias, repo)
                 git.run(["push", "origin", f"{head}:refs/heads/{push_branch}"], cwd=repo)
                 suffix = "（个人分支默认放行）" if not requires_confirmation else ""
                 say("ok", f"已推送 origin/{push_branch}{suffix}")
@@ -623,6 +1105,13 @@ def promote_one(cfg: WtConfig, reg: Registry, alias, rc, dry, args=None):
     else:
         say("info", f"origin/{push_branch} 已是最新")
 
+    # fxh → fxh-dev is a personal publish operation only. Local fxh → dev
+    # integration and origin/dev publication have their own explicit APIs and
+    # confirmation gates; this legacy compound entry point must never fall
+    # through to either dev operation.
+    if cfg.integration == "fxh" and rc.trunk == "dev" and rc.push_branch == "fxh-dev":
+        say("info", "个人分支发布已结束；合并本地 dev 与推送 dev 请分别显式执行独立操作")
+        return
     if rc.promote != "ff-trunk":
         return
     trunk = rc.trunk
@@ -705,6 +1194,9 @@ def cmd_verify(cfg, reg, args):
 
 
 def cmd_revert(cfg, reg, args):
+    # Revert creates a new task from the configured integration branch. Refuse
+    # before reading or creating task state if that branch is main.
+    reject_main_target(cfg, cfg.integration)
     old = reg.find_by_ref(args.task)
     if old["state"] not in ("landed", "promoted", "verified", "reverting"):
         raise WtError(f"任务状态 {old['state']}，没有可回滚的落地")

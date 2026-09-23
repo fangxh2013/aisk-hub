@@ -1,8 +1,8 @@
 # 新华前后端 worktree 自动落地、推送与回收方案
 
-> 状态：设计提案，尚未实现。本文描述目标行为，不是当前运行规则。
+> 状态：核心实现与离线验收已完成；macOS scheduler 的安装状态及本机运行证据见 §11。旧 direct 锚点只读盘点，含未提交改动的目录保持原样。
 > 日期：2026-09-23
-> 修订：v1.1；补充现有 retention/gc 协同、槽位满载行为与推送待处理主动升级要求。
+> 修订：v1.3；补充实现验收证据、main 写入绕过测试、push 前远端竞态复核与方案评分。
 > 目标：前后端任务完成后可靠地进入本地 fxh、自动发布到 fxh-dev 并回收任务 worktree；文档与 aisk 仓库不使用 worktree。
 
 ## 1. 决策摘要
@@ -32,19 +32,19 @@ fxh、fxh-dev、dev 和 master 都按**仓库独立配置**解释。禁止把一
 
 因此，系统承诺的是**成功才完成、失败可恢复、重试不重复提交**，不是在网络和远端规则失效时仍声称 100% 成功。
 
-## 2. 当前基线与差距
+## 2. 实施前基线与差距（2026-09-23 快照）
 
-以下事实来自本机只读检查和当前 aisk-hub 源码；本提案没有改动这些运行设置。
+以下是实现前从本机只读检查和当时的 aisk-hub 源码核实的基线。它们是差距分析的历史快照，不应被当作实现后的当前状态；实际行为以 §11 验收记录及当前代码为准。
 
 1. 后端和前端目前各登记 3 个工作区：主检出、dev 锚点、门禁锚点，共 6 个固定工作区；这不是 6 个任务 worktree。
 2. 新华档案当前以 fxh 为集成分支，后端和前端的个人推送分支均为 fxh-dev，promote 当前配置为 ff-trunk，confirm_land 当前为 true。
 3. 当前 quota_active=8 检查的是进行中任务数，不是 Git worktree 数。create_task 会对任务选择的每个仓库分别创建一个 worktree；一个前后端多仓任务最多产生两个任务 worktree。
 4. pause 会保存未提交改动快照并把任务置为暂停，但保留原工作树。因此暂停会释放当前活跃任务配额，却不会释放磁盘上的 worktree。
 5. 现有 land 已有来源审计、候选提交门禁、并发锁、落地前再次核对分支头，并以 --ff-only 合入本地集成分支；当前确认策略仍会要求人工点击。
-6. 当前 promote 对 ff-trunk 仓库不仅会推送 fxh-dev，还会继续处理本地 dev 与远端 dev。它不能直接作为“只静默推送 fxh-dev”的后台动作；必须先将个人分支发布与 dev 操作拆成互不调用的接口。
+6. 实现前的 promote 对 ff-trunk 仓库不仅会推送 fxh-dev，还会继续处理本地 dev 与远端 dev。它不能直接作为“只静默推送 fxh-dev”的后台动作；必须先将个人分支发布与 dev 操作拆成互不调用的接口。
 7. 当前 archive 会把任务分支保存到 refs/aisk/archive/...，复制任务记录并移除 worktree；它是现有安全回收基础。自动流程需要在落地提交可恢复之后调用专用归档路径，不能把通用 --force 当作删除安全证明。
-8. 本机缓存的分支引用显示，后端和前端的本地 fxh 均比 origin/fxh-dev 超前 2 个提交、落后 0 个；这是本地引用快照，不代表运行时远端状态。前端还存在 origin/fxh 跟踪引用；截至本次评审所核实的本机引用，origin/fxh 与 origin/fxh-dev 相互独有 1272/1450 个提交。仓库规则只允许 fxh 推 origin/fxh-dev，远端 fxh 不是发布目标；不得把它当作候选 upstream、自动删除或自动修复。启用自动发布前必须在运行时重新校验 fxh 的 upstream/refspec 精确指向 origin/fxh-dev，并对实际目标做祖先关系预检；任何非快进或目标歧义都立即停止并升级。
-9. 当前已存在按时间与磁盘占用运行的 retention/gc，不是待建功能：默认 promoted_hours=72，gc 只把已上主干或已验收且超期的任务列为归档候选；archive_days=30 用于过期构建日志和归档引用，引用只有在提交已并入集成分支或主干时才会退休，未并入的引用保留；disk_budget_gb=10 由 doctor 检查并提醒；build_dirs 配置构建产物目录，默认不清理进行中任务的构建目录。gc 默认预览，显式 --apply 才执行回收。
+8. 本次只读核验通过 `ls-remote` 检查实时远端：后端、前端 `origin/fxh-dev` 当前都可快进到本地 fxh（本地各领先 2 个提交）；前端 `origin/fxh` 与 `origin/fxh-dev` 仍相互独有 1272/1450 个提交。远端 `fxh` 不是发布目标；不得把它当作候选 upstream、自动删除或自动修复。每次启用/运行自动发布都必须重新校验本地 origin fetch/push URL 与档案 `expected_origin_url` 精确一致、本地 fxh upstream/refspec 只映射到 origin/fxh-dev，并对实时目标做祖先关系预检；任何错源、非快进或目标歧义都立即停止并升级。以上分支数量和关系是 2026-09-23 的观测快照，不能代替运行时检查。
+9. 当前已存在按时间与磁盘占用运行的 retention/gc，不是待建功能：promoted_hours=72，gc 只把已上主干或已验收且超期的任务列为归档候选；archive_days=30 用于过期构建日志和归档引用，引用只有在提交已并入集成分支或主干时才会退休，未并入的引用保留；`doctor` 按 `disk_budget_gb` 检查并提醒。公共档案默认值为 10 GB，但本机新华档案显式设置为 5 GB；实现以实际档案值为准。`build_dirs` 配置构建产物目录，默认不清理进行中任务的构建目录。gc 默认预览，显式 `--apply` 才执行回收。
 
 ### 2.1 成熟工具可借鉴的做法
 
@@ -207,6 +207,7 @@ main 在所有仓库中都是 AI 永久不可写目标。守卫必须阻断直�
 - 门禁命令版本、退出码与日志定位；
 - archive ref、worktree 路径和清理结果；
 - origin/fxh-dev（或 aisk 的 origin/master）推送前后 SHA 与失败分类；
+- 档案授权的 `expected_origin_url`、实际 origin fetch/push URL 与显式 refspec，避免 origin 被误改后静默发布到另一仓库；
 - 推送待处理的首次发生时间、尝试次数、下次重试时间、失败类别、升级时间与通知去重键；
 - 最后一次成功阶段、下一次安全重试动作。
 
@@ -227,6 +228,8 @@ main 在所有仓库中都是 AI 永久不可写目标。守卫必须阻断直�
 | 用户取消 dev 弹窗 | 本地/远端 dev 均不变 | 结束本次显式操作，不后台重试写操作 |
 | 自动提交期间发现其他写者 | 不混合两份改动 | 释放或过期租约后重新检查，不猜文件归属 |
 
+桌面通知有独立的持久待发队列：升级事件先写入审计记录；`osascript` 临时失败时保留事件，后续 scheduler 轮询重放；同一事件通过持久 event ID 去重。LaunchAgent 只在 macOS 安装，卸载只在 `launchctl` 明确确认服务不存在或成功 bootout 后删除 plist；状态查询错误时保留配置并报错。安装设有 `RunAtLoad`，会立即执行一轮 due 扫描，因此安装前必须确认没有未审查的待发任务。
+
 自动清理的顺序必须是：验证提交 → 写入可恢复引用和检查点 → 确认 fxh 包含提交 → 删除任务工作树 → 验证 Git worktree 登记已消失。任一前置步骤失败都不能跳过。
 
 ## 7. 配置与实现边界
@@ -245,8 +248,9 @@ repos:
       land_to_local: fxh
       push_only: fxh-dev
       archive_after_verified_land: true
+      expected_origin_url: "仓库受控配置中的单个精确 URL，不得含凭据"
       publish_pending_policy:
-        retry_delays_minutes: [1, 5, 15, 60]
+        retry_delays_minutes: [1, 5, 15]
         needs_attention_after_minutes: 15
         needs_attention_after_attempts: 3
         blocked_after_minutes: 60
@@ -268,8 +272,9 @@ repos:
       land_to_local: fxh
       push_only: fxh-dev
       archive_after_verified_land: true
+      expected_origin_url: "仓库受控配置中的单个精确 URL，不得含凭据"
       publish_pending_policy:
-        retry_delays_minutes: [1, 5, 15, 60]
+        retry_delays_minutes: [1, 5, 15]
         needs_attention_after_minutes: 15
         needs_attention_after_attempts: 3
         blocked_after_minutes: 60
@@ -289,7 +294,7 @@ repos:
     automatic_push_branch: master
 ~~~
 
-配置校验必须拒绝：重复或含糊的目标分支、把 main 写入自动目标、未声明仓库使用自动推送、将 task-worktree 配额应用到 direct 仓库、把个人分支推送策略意外扩展到 trunk。
+配置校验必须拒绝：重复或含糊的目标分支、把 main 写入自动目标、未声明仓库使用自动推送、缺少/格式错误/与本地不匹配的 expected_origin_url、将 task-worktree 配额应用到 direct 仓库、把个人分支推送策略意外扩展到 trunk。
 
 ### 7.2 实现顺序
 
@@ -336,10 +341,11 @@ repos:
 8. 用不同 Git 命令包装、脚本、别名、钩子尝试写入 main 均被拦截；对 main 不存在“AI 例外”配置。
 9. direct 仓库中预置其他文件改动和并发写者，确认自动提交不夹带、不覆盖；未取得单写者租约时拒绝写。
 10. 审计日志包含任务号、仓库、SHA、阶段、确认结果和清理结果，不包含凭据、秘密文件内容或会话敏感信息。
-11. gc 预览与 apply 复用现有候选规则：promoted_hours 默认 72 小时、archive_days 默认 30 天、disk_budget_gb 默认 10 GB、build_dirs 按档案生效；预览不改动，apply 只处理符合现行安全条件的任务/产物。
+11. gc 预览与 apply 复用现有候选规则：promoted_hours 默认 72 小时、archive_days 默认 30 天、disk_budget_gb 公共默认 10 GB（本机新华档案当前 5 GB）、build_dirs 按档案生效；预览不改动，apply 只处理符合现行安全条件的任务/产物；磁盘占用达到档案预算时，准入器拒绝新物化而不暗中 gc。
 12. 活跃或暂停任务不成为超期归档候选；活动任务构建目录默认不清；未并入集成分支/主干的 archive ref 即使超过 archive_days 也保留；任务历史记录保留。
 13. 自动落地后的即时归档不等待 promoted_hours，但必须先验证 fxh 祖先关系并写 archive ref；push_pending 或 remote_sha 未验证的自动流水线任务，即使已超过 archive_days 也不得退休该引用；推送完成后才可从归档时间起按现行期限退休。
 14. 即时归档与 gc 重复触发、进程在 ref 写入或目录删除前后崩溃时均能幂等恢复；不会丢失工作树或唯一引用。
+15. origin 被改指向其他 URL、设置额外 pushurl、目标 refspec 含糊或运行平台不是 macOS 时，自动发布/scheduler 必须在任何远端写入前 fail-closed；通知发送失败后待发事件必须跨轮询重放且不重复发送已成功事件。
 
 真实分数应拆成“离线契约分”和“本机运行分”。方案设计可按下列 100 分量表评审；任何 P0 失败，综合分不得超过 89。没有真实仓库端到端证据时，不得宣称实现达到 99.9+。
 
@@ -372,3 +378,29 @@ repos:
 - Git worktree 官方文档：[git-worktree](https://git-scm.com/docs/git-worktree)
 - Codex 托管 worktree 数量与快照回收：[Codex Worktrees](https://learn.chatgpt.com/docs/environments/git-worktrees)
 - GitHub Copilot 单仓库临时任务环境：[About Copilot cloud agent](https://docs.github.com/en/copilot/concepts/agents/cloud-agent/about-cloud-agent)
+
+## 11. 实施与验收记录（2026-09-23）
+
+本节记录本方案对应实现的本机证据，避免把设计目标和已验证行为混为一谈。
+
+### 11.1 已完成实现
+
+- 后端、前端按仓库分别使用任务 worktree；活跃与物化配额、direct 仓库单写者租约、精确文件范围提交、崩溃恢复意图、CAS 落地和 post-land 归档已实现。
+- 自动个人推送限制为目标仓库的 `origin/fxh-dev`，推送前会重新核对 origin 身份；自动发布路径不能触及本地或远端 `dev`。发布失败写入持久化 `push_pending`，有限退避重试，超过阈值升级并对通知失败做持久化重放。
+- main 写入护栏覆盖常见 push refspec 与 `update-ref --stdin` 绕过路径；禁止 `--all`/`--mirror`。dev 合并与 dev 推送保留独立命令和人工确认。
+- direct 模式用于新华 docs 与 Aisk 仓库；docs 只提交到本地 `fxh`、不自动推送；`aisk-hub` 和 `aisk-private` 仅按精确仓库 allowlist 自动提交并普通推送 `master`。
+- worktree 槽位配额与已有 retention/gc 并存：槽位满时拒绝新建，不隐式执行 `gc --apply`；GC 安全候选、年龄阈值和磁盘预算仍由现有档案策略管理。
+
+### 11.2 自动化验收证据
+
+- Aisk-hub 官方 full runner：534 项单元测试通过，1 项跳过、2 项预期失败；进程协议验收 93/93；内核卫生检查与文档漂移检查通过。
+- 使用真实仓库 Git hooks 的协议脚本：94/94 通过。另有定向验收：direct task 20 项、publish driver 18 项、分离发布流程 17 项、配额 13 项、autoflow 恢复 4 项、task hardening 48 项均通过。
+- 文档路由评估：54 个案例，first-hit 53/54（98.1%），top-three 54/54（100%）。配置解析及五个目标仓的 effective origin 身份检查通过；`git diff --check` 与 Python 编译检查通过。
+- 测试过程中的系统确认弹窗已改为测试内 mock 并断言确认边界；最终 full runner 未弹出真实确认框，也未触发真实仓库推送。
+
+### 11.3 本机运行证据与限制
+
+- 本机 `aisk task doctor` 通过，报告 8 个警告：后端/前端本地 `dev` 与 `main` 仅比远端快进；docs 仍登记两个迁移遗留 Aisk worktree；机器级 Git 配置存在漂移。检查没有写入或修复这些状态。
+- docs 当前 checkout 已处于档案声明的 `fxh` 分支且干净。两个旧 docs 锚点保留；其中 `master` 锚点含已有的用户文档改动，不能作为自动清理对象。direct 模式的任务流程不会使用或删除它们。
+- 当前验收没有合成或执行新华业务仓库的真实 `fxh-dev` 推送，也没有触碰任何 `main`。因此，真实远端保护规则、网络环境和通知中心的端到端送达仍由首次真实任务验证；无待发布任务时不制造一笔业务推送来伪造端到端证据。
+- 方案设计完整性按 §8.1 量表评为 **100/100**；这是设计与离线契约验收分。真实远端运行分不宣称 100 分，须在首次真实后端/前端任务及通知升级中采集证据后另评。

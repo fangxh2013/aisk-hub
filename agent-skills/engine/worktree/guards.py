@@ -26,6 +26,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import unquote, urlsplit
 
 from .. import profile as profile_mod
@@ -101,6 +102,8 @@ INTERPRETER_WRITE_RE = re.compile(
     r"""shutil|copy|move|writeFile|appendFile|createWriteStream|os\.system|subprocess|Popen|system\s*\(""", re.I)
 GUARD_BROKEN = "任务守卫自身异常（{detail}）：读可以继续，写入、提交、推送一律拒绝。修复守卫后再继续。"
 MANUAL_ONLY_BRANCHES = {"main", "master"}
+MAIN_BRANCH_WRITE_COMMANDS = GIT_MUTATING | {"branch", "push", "pull", "update-ref", "stash", "submodule"}
+MAIN_BRANCH_TARGET_COMMANDS = {"checkout", "switch", "merge", "rebase", "cherry-pick", "reset", "restore"}
 
 # 任务之外只对受保护分支的写操作询问人。个人集成分支（例如 fxh → fxh-dev）
 # 是日常开发闭环，默认放行；dev/main/master 等受保护分支和 merge dev 必须确认。
@@ -271,6 +274,248 @@ class ShellContext:
         self.vars = {}
 
 
+class MainGuardShellContext:
+    """Minimal shell-analysis context used outside task worktrees for main protection."""
+
+    def __init__(self, cwd):
+        self.cfg = SimpleNamespace(forbidden_commands={})
+        self.cwd = str(cwd)
+        self.task_root = None
+        self.roots = []
+        self.protected_branches = set()
+        self.mutating = False
+        self.vars = {}
+        self.main_guard_only = True
+
+
+def is_main_branch_ref(value):
+    """Recognize exact main refs, including common remote refs and push refspecs."""
+    ref = str(value or "").strip().strip("'\"")
+    if ":" in ref:
+        ref = ref.rsplit(":", 1)[-1]
+    ref = ref.lstrip("+").lower()
+    prefixes = ("refs/heads/", "refs/remotes/", "remotes/origin/", "origin/", "mac/")
+    while True:
+        prefix = next((p for p in prefixes if ref.startswith(p)), None)
+        if not prefix:
+            break
+        ref = ref[len(prefix):]
+    return ref == "main"
+
+
+def main_repo_for_path(path):
+    """Return the repository root when path belongs to a checkout currently on main."""
+    target = Path(str(path or os.getcwd())).expanduser()
+    try:
+        root = profile_mod.repo_root(target)
+        if root and git.current_branch(root) == "main":
+            return root
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def deny_main_write_path(path):
+    root = main_repo_for_path(path)
+    if root:
+        raise Deny(f"Aisk 守卫禁止 AI 修改 main 分支工作区：{root}；该限制不可配置或确认解除。")
+
+
+def direct_repo_context(normalized):
+    """Resolve one configured direct checkout from the host tool's cwd or paths."""
+    candidates = [normalized.get("cwd") or os.getcwd(), *(normalized.get("paths") or [])]
+    if normalized.get("command"):
+        try:
+            candidates.extend(outside_cwd_candidates(normalized["command"], normalized.get("cwd") or os.getcwd()))
+            tokens = tokenize(normalized["command"])
+            for index, token in enumerate(tokens):
+                value = None
+                if token in ("--git-dir", "--work-tree") and index + 1 < len(tokens):
+                    value = tokens[index + 1]
+                elif token.startswith(("--git-dir=", "--work-tree=")) or token.startswith(("GIT_DIR=", "GIT_WORK_TREE=")):
+                    value = token.split("=", 1)[1]
+                if value:
+                    candidate = Path(os.path.expanduser(value.strip("'\"")))
+                    if not candidate.is_absolute():
+                        candidate = Path(normalized.get("cwd") or os.getcwd()) / candidate
+                    candidates.append(candidate)
+        except Exception:  # noqa: BLE001  malformed shell is handled fail-closed once a direct repo is identified
+            pass
+    for candidate in candidates:
+        try:
+            root = profile_mod.repo_root(candidate)
+            if root is None:
+                continue
+            cfg, _why = config.load_config(start=candidate)
+            matches = [rc for rc in cfg.repos.values()
+                       if rc.workspace_mode == "direct" and rc.path.resolve() == root.resolve()]
+            if len(matches) == 1:
+                return cfg, matches[0], root.resolve()
+            if len(matches) > 1:
+                raise Deny("同一普通检出匹配多个 direct 仓库配置，拒绝写入。")
+        except Deny:
+            raise
+        except Exception:  # noqa: BLE001  unrelated projects continue through normal guard routing
+            continue
+    return None
+
+
+def _direct_task_for_repo(cfg, rc, repo):
+    reg = Registry(cfg)
+    matches = []
+    for task in reg.all(include_hub=False):
+        if not task.get("direct_checkout") or task.get("state") not in LIVE_STATES or task.get("os") != cfg.os:
+            continue
+        rows = task.get("repos") or {}
+        if len(rows) != 1 or rc.alias not in rows:
+            continue
+        try:
+            row_path = Path(rows[rc.alias].get("path", "")).resolve()
+        except (OSError, TypeError):
+            continue
+        if row_path == repo:
+            matches.append(task)
+    if len(matches) != 1:
+        if not matches:
+            raise Deny(f"{rc.alias} 是 direct 仓库；写入必须由唯一活跃 direct 任务持有 lease，先运行 aisk task direct-new。")
+        raise Deny(f"{rc.alias} 有多个活跃 direct 任务匹配同一普通检出，拒绝写入。")
+    return matches[0]
+
+
+def _direct_path_in_scope(raw, cwd, repo, allowed_paths):
+    from .. import direct_checkout
+
+    target = Path(strip_uri(raw)).expanduser()
+    if not target.is_absolute():
+        target = Path(cwd) / target
+    target = target.resolve(strict=False)
+    try:
+        rel = target.relative_to(repo).as_posix()
+    except ValueError:
+        raise Deny(f"direct 任务只能写入其声明的仓库范围内：{target}")
+    if not rel or rel == ".git" or rel.startswith(".git/") or not direct_checkout._within_scope(rel, allowed_paths):
+        raise Deny(f"direct 任务未声明此写入路径：{rel or '.'}")
+
+
+def _direct_shell_is_safe_read(command, cwd, task_id=None):
+    """Permit narrow read-only shell commands; all shell writes use direct-finish or file tools."""
+    try:
+        tokens = tokenize(command)
+    except ValueError:
+        return False
+    segments = list(split_simple(tokens))
+    if len(segments) != 1 or not segments[0]:
+        return False
+    argv = segments[0]
+    prog = prog_name(argv[0], set())
+    if prog in ("aisk", "xw"):
+        rest = list(argv[1:])
+        if rest[:1] == [names.SUBCOMMAND]:
+            rest = rest[1:]
+        return bool(task_id and len(rest) >= 2 and rest[0] == "direct-finish" and rest[1] == task_id)
+    if prog == "git":
+        argv = list(argv[1:])
+        if argv[:1] == ["-C"]:
+            argv = argv[2:]
+        if not argv:
+            return False
+        sub = argv[0]
+        if sub in {"status", "diff", "log", "show", "rev-parse", "ls-files", "grep", "describe"}:
+            return not any(x in argv for x in (">", ">>", "<", "|"))
+        if sub == "branch":
+            return any(x in argv for x in ("--show-current", "--list", "-l", "-a", "-r", "--all", "-v", "-vv"))
+        if sub == "remote":
+            return len(argv) > 1 and argv[1] in {"show", "get-url", "-v"}
+        if sub == "config":
+            return len(argv) > 1 and (argv[1] in CONFIG_QUERY_FLAGS or argv[1] in ("get", "get-all", "get-regexp", "list"))
+        return False
+    if prog == "find":
+        return not any(x in argv for x in ("-delete", "-exec", "-execdir", ">", ">>", "|"))
+    return prog in {"pwd", "ls", "cat", "head", "tail", "wc", "file", "stat", "du", "df", "rg", "grep"} \
+        and not any(x in argv for x in (">", ">>", "<", "|"))
+
+
+def direct_checkout_guard(normalized):
+    """Guard host writes aimed at direct repositories outside task worktrees.
+
+    File editors are permitted only for paths inside the active task's declared
+    scope while its persistent lease and clean branch/HEAD baseline still match.
+    Shell writes are routed to direct-finish or denied because their full write
+    set cannot be proven before execution.
+    """
+    if not (normalized.get("write") or normalized.get("command") or normalized.get("unresolved_write")):
+        return None
+    try:
+        context = direct_repo_context(normalized)
+    except Deny as error:
+        return str(error)
+    if context is None:
+        return None
+    cfg, rc, repo = context
+    if normalized.get("command"):
+        if _direct_shell_is_safe_read(normalized["command"], normalized.get("cwd") or os.getcwd()):
+            return None
+    try:
+        task = _direct_task_for_repo(cfg, rc, repo)
+        if normalized.get("command"):
+            if _direct_shell_is_safe_read(normalized["command"], normalized.get("cwd") or os.getcwd(), task["id"]):
+                return None
+            raise Deny("direct 任务不允许普通 shell 写入；请使用声明范围内的文件编辑工具，完成时运行 aisk task direct-finish。")
+        from .. import direct_checkout
+        row = task["repos"][rc.alias]
+        baseline = direct_checkout.RepoBaseline.from_dict(row.get("direct_baseline"))
+        expected = str(rc.automatic.get("commit_branch") or "")
+        if not expected or expected.lower() == "main" or baseline.branch != expected or row.get("branch") != expected:
+            raise Deny(f"{rc.alias} direct 任务的 commit_branch 基线无效或命中 main，拒绝写入。")
+        if normalized.get("unresolved_write"):
+            raise Deny("direct 仓库写入工具没有提供可核对的目标路径，拒绝写入。")
+        lease = direct_checkout.acquire_repo_lease(repo, owner=task["id"], runtime_root=cfg.data_root)
+        try:
+            validation = direct_checkout.validate_task_changes(repo, baseline, lease=lease)
+            validation.raise_if_invalid()
+            if validation.current_branch != expected:
+                raise Deny(f"direct 仓库当前分支为 {validation.current_branch}，要求 {expected}。")
+            for raw in normalized.get("paths") or []:
+                _direct_path_in_scope(raw, normalized.get("cwd") or os.getcwd(), repo, baseline.allowed_paths)
+        finally:
+            lease.close()
+    except Deny as error:
+        return str(error)
+    except Exception as error:  # noqa: BLE001  direct guard fails closed on lease/config/state errors
+        return f"direct 仓库写守卫失败，已拒绝写入：{type(error).__name__}: {str(error)[:180]}"
+    return None
+
+
+def check_main_git_write(ctx, sub, rest, positional, cwd):
+    """Reject writes on main and explicit writes targeting main, regardless of profile policy."""
+    current = git.current_branch(cwd) if cwd else None
+    if current == "main" and sub in MAIN_BRANCH_WRITE_COMMANDS:
+        raise Deny("Aisk 守卫禁止 AI 在 main 分支执行写操作；该限制不可配置或确认解除。")
+
+    refs = []
+    if sub in MAIN_BRANCH_TARGET_COMMANDS:
+        refs = positional
+    elif sub == "branch":
+        branch_mutation_flags = {"-f", "--force", "-d", "-D", "--delete", "-m", "-M", "--move",
+                                "-c", "-C", "--copy"}
+        branch_read_flags = {"--list", "-l", "--show-current", "--contains", "--merged", "--no-merged",
+                             "--points-at", "--format", "-v", "-vv", "-a", "-r", "--all", "--remotes"}
+        if any(flag in rest for flag in branch_mutation_flags) or not any(flag in rest for flag in branch_read_flags):
+            refs = positional
+    elif sub == "update-ref":
+        if "--stdin" in rest:
+            raise Deny("Aisk 守卫无法无歧义核对 git update-ref --stdin 的目标；为保护 main，已拒绝该写入。")
+        refs = positional[:1]
+    elif sub == "push":
+        if any(option in rest for option in ("--all", "-a", "--branches", "--mirror")):
+            raise Deny("Aisk 守卫禁止 git push --all/--mirror 等批量引用推送；无法保证 main 不被写入。")
+        refs = [value for value in positional if ":" in value or is_main_branch_ref(value)]
+    elif sub == "worktree" and positional and positional[0] == "add":
+        refs = positional[1:]
+    if any(is_main_branch_ref(value) for value in refs):
+        raise Deny("Aisk 守卫禁止 AI 修改 main 分支引用；该限制不可配置或确认解除。")
+
+
 def expand_home(text):
     home = os.path.expanduser("~")
     return re.sub(r"\$\{HOME\}|\$HOME|(?<![\w/])~(?=/|\s|$)", lambda m: home, text)
@@ -337,6 +582,10 @@ def resolve_path(ctx, token):
 
 def deny_if_protected(ctx, token, message):
     target = resolve_path(ctx, token)
+    if getattr(ctx, "main_guard_only", False):
+        if target:
+            deny_main_write_path(target)
+        return
     if target and is_protected(target, ctx.task_root, ctx.roots):
         raise Deny(f"{message}：{token}{unmounted_repo_hint(ctx.cfg, target, ctx.task_root)}")
 
@@ -360,6 +609,8 @@ def analyze_text(ctx, text, depth=0):
     try:
         tokens = tokenize(text)
     except ValueError:
+        if getattr(ctx, "main_guard_only", False) and main_repo_for_path(ctx.cwd):
+            raise Deny("main 分支命令无法安全解析，Aisk 守卫已按 fail-closed 拒绝。")
         conservative_scan(ctx, text)
         return
     for argv in split_simple(tokens):
@@ -373,6 +624,9 @@ def conservative_scan(ctx, text):
 
 
 def env_assignment(ctx, name, value):
+    if getattr(ctx, "main_guard_only", False):
+        ctx.vars[name] = value
+        return
     if name in GIT_ENV_OVERRIDES:
         raise Deny(f"任务内禁止通过环境变量 {name} 改写 git 配置或传输方式。")
     if name in GIT_TARGET_ENV:
@@ -493,6 +747,7 @@ def check_task_cli(ctx, prog, args):
 
 def check_git(ctx, prog, args, depth):
     opts, i = [], 0
+    git_cwd = ctx.cwd
     if prog.startswith("git-"):
         sub, rest = prog[4:], list(args)
     else:
@@ -514,6 +769,17 @@ def check_git(ctx, prog, args, depth):
             i += 1
         sub, rest = (args[i] if i < len(args) else ""), list(args[i + 1:])
     for key, value in opts:
+        if getattr(ctx, "main_guard_only", False):
+            if key == "-C" and value:
+                git_cwd = os.path.normpath(os.path.join(ctx.cwd, os.path.expanduser(value.strip("'\""))))
+                continue
+            if key in ("--git-dir", "--work-tree") and value:
+                raise Deny("Aisk 守卫无法安全核对重定向的 Git 目录；请在仓库普通检出中执行。")
+            if key == "-c" and value is not None:
+                name = value.split("=", 1)[0].lower()
+                if name.startswith(DANGEROUS_CONFIG):
+                    raise Deny("Aisk 守卫无法安全核对临时 Git 配置；请移除该覆盖后重试。")
+            continue
         if key in ("-c", "--config-env") and value is not None:
             name = value.split("=", 1)[0].lower()
             if name.startswith(DANGEROUS_CONFIG):
@@ -533,6 +799,11 @@ def check_git(ctx, prog, args, depth):
                 check_git(ctx, "git", shlex.split(alias) + rest, depth + 1)
         return
     positional = [a for a in rest if not a.startswith("-")]
+    check_main_git_write(ctx, sub, rest, positional, git_cwd)
+    if getattr(ctx, "main_guard_only", False):
+        if sub in MAIN_BRANCH_WRITE_COMMANDS:
+            ctx.mutating = True
+        return
     if sub in GIT_FORBIDDEN_ALWAYS:
         raise Deny(GIT_FORBIDDEN_ALWAYS[sub])
     if sub == "stash" and (not positional or positional[0] not in ("list", "show")):
@@ -618,6 +889,8 @@ def git_alias(ctx, sub):
 def check_paths(ctx, prog, argv):
     args = [a for a in argv[1:] if not a.startswith("-") or "=" in a]
     if prog in ("cd", "pushd") and args:
+        if getattr(ctx, "main_guard_only", False):
+            return
         deny_if_protected(ctx, args[0], "任务内禁止进入主工作区、锚点、hub、登记簿或其他任务")
         return
     if prog in WRITE_PROGS:
@@ -1184,11 +1457,48 @@ def locate_task(normalized, fallback=None):
     return find_task_root(fallback) if fallback else None
 
 
+def deny_main_branch_write_request(normalized):
+    """Apply the unconditional main guard to file tools and shell commands, with or without a task."""
+    if normalized.get("write"):
+        for raw in normalized.get("paths", []):
+            target = Path(strip_uri(raw)).expanduser()
+            if not target.is_absolute():
+                target = Path(normalized.get("cwd") or os.getcwd()) / target
+            try:
+                deny_main_write_path(target)
+            except Deny as error:
+                return str(error)
+
+    command = normalized.get("command") or ""
+    if not command:
+        return None
+    cwd = normalized.get("cwd") or os.getcwd()
+    try:
+        candidates = outside_cwd_candidates(command, cwd)
+    except Exception:  # noqa: BLE001
+        candidates = [cwd]
+    for candidate in candidates:
+        # Shell parsing finds relative paths, redirections, wrapped commands,
+        # git aliases, and explicit refs without needing a project profile.
+        ctx = MainGuardShellContext(candidate)
+        try:
+            analyze_text(ctx, command)
+        except Deny as error:
+            return str(error)
+    return None
+
+
 def evaluate(payload, tool, task_root=None):
     """返回拒绝理由；放行返回 None。"""
     normalized = normalize(payload)
+    main_write_reason = deny_main_branch_write_request(normalized)
+    if main_write_reason:
+        return main_write_reason
     task_root = locate_task(normalized, task_root)
     if task_root is None:
+        direct_reason = direct_checkout_guard(normalized)
+        if direct_reason:
+            return direct_reason
         # 用户级宿主 hook 没有固定任务根，因此任务外动作必须在这里单独处理。
         # 个人分支 push 默认放行，受保护分支 push/merge 统一交给带工具归属的确认框；
         # 未接入宿主 hook 的工具仍由远端 branch protection 作为最终兜底。

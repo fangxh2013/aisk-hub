@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import actor, bind, gates, gitops as git, model, registry
+from . import actor, bind, gates, gitops as git, model, publish_pending, registry
 from . import names
 from .config import WtConfig, WtError
 from ..action_context import ActionContext, ActionContextError
@@ -51,6 +51,8 @@ def legacy_lanes(cfg: WtConfig):
 
 
 def require_local(cfg: WtConfig, task, states=None):
+    if task.get("direct_checkout"):
+        raise WtError(f"任务 {task['id']} 使用 direct checkout；请使用 aisk task direct-resume/direct-finish")
     if not is_local(cfg, task):
         raise WtError(f"任务 {task['id']} 属于 {task.get('os')}，只能在该系统上操作")
     if task.get("creating"):
@@ -206,11 +208,113 @@ def free_port_block(reg: Registry):
     raise WtError("端口块已用尽，请归档不用的任务")
 
 
-def check_quota(cfg: WtConfig, reg: Registry, exclude=None):
+ACTIVE_WORKTREE_STATES = ("active", "ready", "queued", "rejected")
+
+
+def _inside(path, root):
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def worktree_quota_snapshot(cfg: WtConfig, reg: Registry):
+    """Count task worktrees independently of task state and legacy task quotas.
+
+    Git registrations under tasks_dir are the physical source of truth. Creation
+    reservations cover the short interval between registry reservation and
+    `git worktree add`; this prevents two concurrent creators from taking the
+    same last slot. Anchors and ordinary checkouts live outside tasks_dir.
+    """
+    physical = {alias: set() for alias in cfg.repo_order}
+    active = {alias: set() for alias in cfg.repo_order}
+    for alias in cfg.repo_order:
+        rc = cfg.repo(alias)
+        try:
+            if not rc.path.is_dir() or not git.ok(["rev-parse", "--git-dir"], cwd=rc.path):
+                continue
+        except OSError:
+            # A profile can outlive a missing checkout or point at an
+            # incomplete clone. Quota accounting is read-only and must not
+            # turn that unrelated repository problem into a task-creation
+            # crash; the command that targets that repo still fails closed.
+            continue
+        for wt in git.worktree_list(rc.path):
+            path = Path(wt["path"])
+            if _inside(path, cfg.tasks_dir):
+                physical.setdefault(alias, set()).add(str(path.resolve()))
+
+    tasks_local = [t for t in reg.all(include_archived=True, include_hub=False) if is_local(cfg, t)]
+    for task in tasks_local:
+        is_active = task.get("state") in ACTIVE_WORKTREE_STATES
+        reservations = set(task.get("creating_repos") or []) if task.get("creating") else set()
+        for alias, row in (task.get("repos") or {}).items():
+            if alias not in cfg.repos or cfg.repo(alias).workspace_mode != "task-worktree":
+                continue
+            path = str(Path(row.get("path") or "").resolve())
+            if path and _inside(path, cfg.tasks_dir) and Path(path).exists():
+                physical.setdefault(alias, set()).add(path)
+                if is_active:
+                    active.setdefault(alias, set()).add(path)
+        for alias in reservations:
+            if alias not in cfg.repos or cfg.repo(alias).workspace_mode != "task-worktree":
+                continue
+            path = str((Path(task["dir"]) / alias).resolve())
+            physical.setdefault(alias, set()).add(path)
+            if is_active:
+                active.setdefault(alias, set()).add(path)
+    return {
+        "physical_by_repo": {alias: len(paths) for alias, paths in physical.items()},
+        "active_by_repo": {alias: len(paths) for alias, paths in active.items()},
+        "physical_total": sum(len(paths) for paths in physical.values()),
+        "active_total": sum(len(paths) for paths in active.values()),
+    }
+
+
+def check_quota(cfg: WtConfig, reg: Registry, exclude=None, repos=None, materialize=None):
+    """Enforce task-record quota plus optional per-repo physical worktree caps.
+
+    `repos` are new active slots requested by task creation/resume. `materialize`
+    counts a new physical checkout; it differs during resume because a paused
+    task already owns its worktree. Callers hold the registry lock.
+    """
     working = [t for t in reg.all(include_hub=False)
                if t.get("state") in WORKING_STATES and t["id"] != exclude and is_local(cfg, t)]
     if len(working) >= cfg.quota_active:
         raise WtError(f"本机进行中的任务已达上限 {cfg.quota_active}（档案 worktrees.quotas.active），请先 aisk task pause 或归档")
+    snapshot = worktree_quota_snapshot(cfg, reg)
+    wanted = [a for a in (repos or []) if a in cfg.repos and cfg.repo(a).workspace_mode == "task-worktree"]
+    projected_active = snapshot["active_total"] + len(wanted)
+    if cfg.quota_active_worktrees and projected_active > cfg.quota_active_worktrees:
+        raise WtError(f"活跃任务 worktree 已占 {snapshot['active_total']}/{cfg.quota_active_worktrees} 个；"
+                      f"本次需要 {len(wanted)} 个。请先完成并安全回收任务，或稍后重试")
+    for alias in wanted:
+        limit = cfg.repo(alias).limits.get("active_worktrees")
+        used = snapshot["active_by_repo"].get(alias, 0)
+        if limit is not None and used + 1 > limit:
+            raise WtError(f"仓库 {alias} 活跃 worktree 已占 {used}/{limit} 个；请先完成并安全回收任务")
+    materializing = [a for a in (materialize if materialize is not None else repos or [])
+                     if a in cfg.repos and cfg.repo(a).workspace_mode == "task-worktree"]
+    if materializing and cfg.tasks_dir.is_dir():
+        used_bytes = dir_size(cfg.tasks_dir)
+        budget_bytes = int(float(cfg.retention.get("disk_budget_gb", 10)) * (1 << 30))
+        if used_bytes >= budget_bytes:
+            used_gb = used_bytes / (1 << 30)
+            budget_gb = budget_bytes / (1 << 30)
+            raise WtError(
+                f"任务目录磁盘占用已达 {used_gb:.2f}/{budget_gb:.2f}GB，拒绝新建物化 worktree；"
+                "不会自动清理，请先运行 aisk task gc 预览可回收项"
+            )
+    projected_physical = snapshot["physical_total"] + len(materializing)
+    if cfg.quota_materialized and projected_physical > cfg.quota_materialized:
+        raise WtError(f"任务 worktree 物理槽位已占 {snapshot['physical_total']}/{cfg.quota_materialized} 个；"
+                      f"本次需要 {len(materializing)} 个。不会自动驱逐暂停任务；请查看 aisk task gc 预览")
+    for alias in materializing:
+        limit = cfg.repo(alias).limits.get("materialized_worktrees")
+        used = snapshot["physical_by_repo"].get(alias, 0)
+        if limit is not None and used + 1 > limit:
+            raise WtError(f"仓库 {alias} 物理 worktree 已占 {used}/{limit} 个；不会自动清理现场")
 
 
 def java_home(cfg: WtConfig, aliases):
@@ -263,8 +367,12 @@ def create_task(cfg: WtConfig, reg: Registry, *, slug, title, repos, goal="", ac
     repos = [a.strip() for a in repos if a and a.strip()]
     if not repos or len(repos) != len(set(repos)):
         raise WtError("仓库列表不能为空或重复")
+    if cfg.profile_name == "xinhua" and len(repos) > 1 and set(repos) & {"be", "web"}:
+        raise WtError("新华前端 web 与后端 be 必须拆成独立任务，分别提交、门禁、落地和发布")
     for alias in repos:
-        cfg.repo(alias)
+        rc = cfg.repo(alias)
+        if rc.workspace_mode == "direct":
+            raise WtError(f"{alias} 配置为 direct，不创建任务 worktree；请使用 aisk task direct-new")
     from_refs, source_branches = dict(from_refs or {}), dict(source_branches or {})
     if scope and not new_anyway:
         conflicts = scope_conflicts(cfg, reg, repos, scope)
@@ -284,7 +392,7 @@ def create_task(cfg: WtConfig, reg: Registry, *, slug, title, repos, goal="", ac
             lines = [f"{t['id']} {t['title']}（{t['state']}，相似度 {s}）" for s, _c, t in dups[:5]]
             raise WtError("疑似重复任务，请先 aisk task claim 续做：\n  " + "\n  ".join(lines)
                           + "\n确需另开：加 --new-anyway \"理由\"")
-        check_quota(cfg, reg)
+        check_quota(cfg, reg, repos=repos, materialize=repos)
         parent = None
         if base:
             parent = reg.find_by_ref(base)
@@ -304,6 +412,7 @@ def create_task(cfg: WtConfig, reg: Registry, *, slug, title, repos, goal="", ac
             "base_task": parent["id"] if parent else None, "scope": list(scope or []), "repos": {},
             "source_branches": source_branches, "state": "active", "owner": None, "created_at": now_iso(),
             "history": [], "new_anyway": new_anyway or None, "creating": now_iso(),
+            "creating_repos": [a for a in repos if cfg.repo(a).workspace_mode == "task-worktree"],
         }
         task.update(extra or {})
         reg.save(task)
@@ -335,6 +444,7 @@ def create_task(cfg: WtConfig, reg: Registry, *, slug, title, repos, goal="", ac
         task["base_short"] = next(iter(task["repos"].values()))["base_sha"][:9]
         bind.write_task_files(cfg, task, java_home(cfg, repos))
         task.pop("creating", None)
+        task.pop("creating_repos", None)
         if tool:
             task["owner"] = new_owner(cfg, tool, sessions)
             append_progress(task, progress_line(tool, "开始任务并认领"))
@@ -407,7 +517,9 @@ def cmd_claim(cfg, reg, args):
         if why == "接手" and lease == model.IDLE and not (args.reason or "").strip():
             raise WtError("接手空闲任务必须写 --reason（为什么判断原执行者不会回来）")
         if task["state"] == "parked":
-            check_quota(cfg, reg, exclude=task["id"])
+            # A parked task keeps its materialized checkout. Claiming it
+            # consumes an active slot, not a second physical-worktree slot.
+            check_quota(cfg, reg, exclude=task["id"], repos=list(task["repos"]), materialize=[])
         task["owner"] = new_owner(cfg, tool, sessions)
         if why == "接手":
             note = f"接手（原执行者 {owner_label(prev)}，{model.LEASE_LABEL[lease]}）"
@@ -474,6 +586,8 @@ def cmd_add_repo(cfg, reg, args):
     if alias in task["repos"]:
         raise WtError(f"{task['id']} 已经挂了 {alias}：{task['repos'][alias]['path']}")
     rc = cfg.repo(alias)
+    if rc.workspace_mode == "direct":
+        raise WtError(f"{alias} 配置为 direct，不能补挂到 worktree 任务；请创建独立 direct 任务")
     repo = rc.path
     if not repo.exists():
         raise WtError(f"本机没有仓库 {alias}：{repo}")
@@ -645,6 +759,17 @@ def board_text(cfg: WtConfig, reg: Registry, quick=False):
     lines = [f"# 任务看板（{cfg.profile_name}）", "",
              f"> 生成于 {now_iso()[:16].replace('T', ' ')}；无动静 {cfg.idle_minutes} 分钟显示空闲、"
              f"{cfg.claimable_minutes} 分钟可接手（档案 worktrees.lease 可调）。", ""]
+    quota = worktree_quota_snapshot(cfg, reg)
+    active_limit = cfg.quota_active_worktrees or "未配置"
+    physical_limit = cfg.quota_materialized or "未配置"
+    per_repo = "、".join(
+        f"{alias} {quota['active_by_repo'].get(alias, 0)}/{cfg.repo(alias).limits.get('active_worktrees', '未配置')}活跃"
+        f"·{quota['physical_by_repo'].get(alias, 0)}/{cfg.repo(alias).limits.get('materialized_worktrees', '未配置')}物理"
+        for alias in cfg.repo_order
+        if cfg.repo(alias).workspace_mode == "task-worktree" and cfg.repo(alias).limits
+    )
+    lines.append(f"## worktree 槽位\n- 活跃 {quota['active_total']}/{active_limit}；物理 {quota['physical_total']}/{physical_limit}"
+                 + (f"；{per_repo}" if per_repo else "") + "\n")
     for key, label in model.GROUPS:
         lines.append(f"## {label}（{len(groups[key])}）")
         lines += groups[key] or ["- 无"]
@@ -806,6 +931,34 @@ def _commit_paths(repo, paths, all_paths):
     return result
 
 
+def _commit_path_in_scope(path, paths):
+    return any(scope == "." or path == scope or path.startswith(scope.rstrip("/") + "/") for scope in paths)
+
+
+def _commit_intent_matches(intent, *, branch, message, paths, all_paths):
+    return (isinstance(intent, dict) and intent.get("version") == 1
+            and intent.get("branch") == branch and intent.get("message") == message
+            and intent.get("paths") == list(paths) and bool(intent.get("all_paths")) == bool(all_paths))
+
+
+def _recover_intended_commit(repo, intent):
+    """Recognize a commit completed after durable intent but before task save."""
+    head = git.sha(repo, "HEAD")
+    base = intent.get("base_sha")
+    tree = intent.get("tree_sha")
+    if not head or not base or not tree or head == base:
+        return None
+    parents = git.out(["show", "-s", "--format=%P", head], cwd=repo).split()
+    actual_tree = git.out(["rev-parse", "--verify", f"{head}^{{tree}}"], cwd=repo).strip()
+    message = git.out(["show", "-s", "--format=%B", head], cwd=repo).strip()
+    changed = git.diff_names(repo, base, head)
+    paths = intent.get("paths") or []
+    if (parents != [base] or actual_tree != tree or message != intent.get("message") or not changed
+            or any(not _commit_path_in_scope(path, paths) for path in changed)):
+        raise WtError("检测到 commit intent 后分支头已变化，但提交与持久意图不完全匹配；保留意图并停止，请人工核对")
+    return head
+
+
 def cmd_commit(cfg, reg, args):
     """在任务分支本地提交，完全不读取或修改 fxh 主工作区，也不推送远端。"""
     tool, sessions = caller(args)
@@ -819,21 +972,98 @@ def cmd_commit(cfg, reg, args):
         aliases = select_repos(cfg, task, getattr(args, "repos", None))
         committed = []
         for alias in aliases:
-            path = Path(task["repos"][alias]["path"])
-            if git.current_branch(path) != task["repos"][alias]["branch"]:
-                raise WtError(f"{alias}: 当前分支不是任务分支 {task['repos'][alias]['branch']}")
+            row = task["repos"][alias]
+            path = Path(row["path"])
+            branch = row["branch"]
+            if git.current_branch(path) != branch:
+                raise WtError(f"{alias}: 当前分支不是任务分支 {branch}")
             err = model.check_message(cfg, message)
             if err:
                 raise WtError(err)
-            add_paths = _commit_paths(path, args.paths, args.all)
-            git.run(["add", "-A", "--", *add_paths], cwd=path)
-            staged = git.out(["diff", "--cached", "--name-only", "--"], cwd=path)
-            if not staged:
-                raise WtError(f"{alias}: 没有可提交的暂存改动（路径可能为空）")
-            git.run(["commit", "-m", message], cwd=path)
-            sha = git.sha(path, "HEAD")
+            all_paths = bool(getattr(args, "all", False))
+            add_paths = _commit_paths(path, args.paths, all_paths)
+            intent = row.get("commit_intent")
+            if intent:
+                if not _commit_intent_matches(intent, branch=branch, message=message,
+                                              paths=add_paths, all_paths=all_paths):
+                    raise WtError(f"{alias}: 存在未完成的 commit intent；必须用原提交说明和原路径重试")
+                recovered = _recover_intended_commit(path, intent)
+                if intent.get("status") == "committed":
+                    if not recovered or recovered != intent.get("post_sha"):
+                        raise WtError(f"{alias}: 已记录完成的 commit intent 与当前 HEAD 不匹配；停止自动恢复")
+                    sha = recovered
+                elif recovered:
+                    sha = recovered
+                    intent["status"] = "committed"
+                    intent["post_sha"] = sha
+                    reg.save(task)
+                else:
+                    if git.sha(path, "HEAD") != intent.get("base_sha"):
+                        raise WtError(f"{alias}: commit intent 基线已变化；停止自动恢复")
+                    if intent.get("tree_sha"):
+                        tree = git.out(["write-tree"], cwd=path).strip()
+                        unstaged = set(git.out(["diff", "--name-only", "--"], cwd=path).splitlines())
+                        untracked = set(git.out(["ls-files", "--others", "--exclude-standard"], cwd=path).splitlines())
+                        if (tree != intent["tree_sha"]
+                                or any(_commit_path_in_scope(p, add_paths) for p in unstaged | untracked)):
+                            raise WtError(f"{alias}: commit intent 建立后 index 或范围内工作区发生变化；保留现场并停止")
+                    else:
+                        git.run(["add", "-A", "--", *add_paths], cwd=path)
+                        staged = {p for p in git.out(["diff", "--cached", "--name-only", "-z"], cwd=path).split("\0") if p}
+                        outside = sorted(p for p in staged if not _commit_path_in_scope(p, add_paths))
+                        if outside:
+                            raise WtError(f"{alias}: 暂存区包含未请求路径：{'、'.join(outside[:12])}；未提交")
+                        if not staged:
+                            raise WtError(f"{alias}: 没有可提交的暂存改动（路径可能为空）")
+                        intent["tree_sha"] = git.out(["write-tree"], cwd=path).strip()
+                        reg.save(task)
+                    git.run(["commit", "-m", message], cwd=path)
+                    sha = git.sha(path, "HEAD")
+                    parents = git.out(["show", "-s", "--format=%P", sha], cwd=path).split()
+                    tree = git.out(["rev-parse", "--verify", f"{sha}^{{tree}}"], cwd=path).strip()
+                    if parents != [intent["base_sha"]] or tree != intent.get("tree_sha"):
+                        raise WtError(f"{alias}: 提交结果未匹配持久 intent；保留意图并停止")
+                    intent["status"] = "committed"
+                    intent["post_sha"] = sha
+                    reg.save(task)
+            else:
+                base_sha = git.sha(path, "HEAD")
+                intent = {"version": 1, "branch": branch, "base_sha": base_sha, "message": message,
+                          "paths": list(add_paths), "all_paths": all_paths, "tree_sha": None,
+                          "post_sha": None, "status": "pending", "created_at": now_iso()}
+                row["commit_intent"] = intent
+                reg.save(task)
+                # Process the new intent in the same path as a retry. Keeping
+                # the intent in registry before `git add` makes every later
+                # interruption discoverable and replayable.
+                recovered = None
+                git.run(["add", "-A", "--", *add_paths], cwd=path)
+                staged = {p for p in git.out(["diff", "--cached", "--name-only", "-z"], cwd=path).split("\0") if p}
+                outside = sorted(p for p in staged if not _commit_path_in_scope(p, add_paths))
+                if outside:
+                    raise WtError(f"{alias}: 暂存区包含未请求路径：{'、'.join(outside[:12])}；未提交")
+                if not staged:
+                    raise WtError(f"{alias}: 没有可提交的暂存改动（路径可能为空）")
+                intent["tree_sha"] = git.out(["write-tree"], cwd=path).strip()
+                reg.save(task)
+                git.run(["commit", "-m", message], cwd=path)
+                sha = git.sha(path, "HEAD")
+                parents = git.out(["show", "-s", "--format=%P", sha], cwd=path).split()
+                tree = git.out(["rev-parse", "--verify", f"{sha}^{{tree}}"], cwd=path).strip()
+                if parents != [intent["base_sha"]] or tree != intent.get("tree_sha"):
+                    raise WtError(f"{alias}: 提交结果未匹配持久 intent；保留意图并停止")
+                intent["status"] = "committed"
+                intent["post_sha"] = sha
+                reg.save(task)
             task["repos"][alias]["ready_sha"] = None
             committed.append(f"{alias}@{sha[:9] if sha else 'unknown'}")
+        # Keep per-repo committed intents durable until every selected repo
+        # has completed; a later repo failure must not make an earlier commit
+        # look like a fresh no-op when the multi-repo command is retried.
+        for alias in aliases:
+            intent = task["repos"][alias].get("commit_intent")
+            if intent and intent.get("status") == "committed":
+                task["repos"][alias].pop("commit_intent", None)
         if task.get("state") in ("ready", "parked", "rejected"):
             task["owner"] = task.get("owner") or new_owner(cfg, tool, sessions)
             reg.set_state(task, "active", note="任务分支本地提交；ready 登记已失效")
@@ -1237,6 +1467,18 @@ def retirable_archive_refs(cfg: WtConfig, reg: Registry):
             sha = git.sha(repo, ref)
             if not sha:
                 continue
+            auto = cfg.repo(alias).automatic
+            repo_record = (t.get("repos") or {}).get(alias) or {}
+            if auto.get("push_only"):
+                # Local fxh reachability alone is insufficient for tasks whose
+                # only recovery copy may be the archive ref while fxh-dev is
+                # still pending, rejected, or not yet verified remotely.
+                operation_key = repo_record.get("publish_operation_key")
+                state = publish_pending.PublishPendingStore(cfg.state_dir / "publish-pending").get(operation_key) \
+                    if operation_key else None
+                if not repo_record.get("remote_sha") or not state or state.get("status") != publish_pending.PUBLISHED:
+                    kept.append((t, alias, repo, ref, sha))
+                    continue
             merged = any(git.sha(repo, b) and git.is_ancestor(repo, sha, b)
                          for b in (cfg.integration, cfg.repo(alias).trunk))
             (retirable if merged else kept).append((t, alias, repo, ref, sha))
@@ -1312,6 +1554,8 @@ def cmd_archive(cfg, reg, args):
     tool, sessions = caller(args)
     with reg.lock():
         task = reg.find_by_ref(args.task)
+        if task.get("direct_checkout"):
+            raise WtError("direct 任务没有 worktree 可归档；使用 direct-finish 或干净基线下的 direct-abort")
         if not is_local(cfg, task):
             raise WtError("只能在任务所属系统上归档")
         resuming = bool(task.get("archiving"))
@@ -1414,6 +1658,8 @@ def cmd_restore(cfg, reg, args):
 # ------------------------------------------------------------------ adopt / adopt-branch
 def cmd_adopt_branch(cfg, reg, args):
     alias = args.repo
+    if cfg.repo(alias).workspace_mode == "direct":
+        raise WtError(f"{alias} 是 direct 仓库，不能 adopt 成任务 worktree")
     repo = cfg.repo(alias).path
     if args.branch in cfg.protected:
         raise WtError("受保护分支不能被接手成任务")
@@ -1438,6 +1684,8 @@ def cmd_adopt_branch(cfg, reg, args):
 def cmd_adopt(cfg, reg, args):
     src = Path(args.path).resolve()
     alias = args.repo
+    if cfg.repo(alias).workspace_mode == "direct":
+        raise WtError(f"{alias} 是 direct 仓库，不能 adopt 成任务 worktree")
     repo = cfg.repo(alias).path
     good, info = git.backlink_ok(src)
     if not good:
@@ -1453,7 +1701,7 @@ def cmd_adopt(cfg, reg, args):
     with reg.lock():
         if reg.find_by_path(src):
             raise WtError("源目录已受任务引擎管理")
-        check_quota(cfg, reg)
+        check_quota(cfg, reg, repos=[alias], materialize=[alias])
         tid = reg.next_id()
         name = f"{tid}-{args.slug}"
         td = cfg.tasks_dir / name

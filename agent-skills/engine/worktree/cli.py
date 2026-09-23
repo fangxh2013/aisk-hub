@@ -8,7 +8,7 @@ import sys
 
 from .. import profile as profile_mod
 from ..miniyaml import YamlSubsetError
-from . import doctor, guards, hooks, integrate, legacy, tasks
+from . import autoflow, direct_tasks, doctor, guards, hooks, integrate, legacy, publish_scheduler, tasks
 from .config import WtError, load_config
 from .registry import Registry, file_lock, say
 
@@ -23,13 +23,16 @@ USAGE = """aisk task：多 AI 并行任务工作区。说明见 agent-skills 的
 交付：
   aisk task commit <任务> -m "type: 说明" [--path 路径]  →  aisk task check <任务>  →  填 HANDOFF.md  →  aisk task ready <任务> [--repos …]  →  aisk task land <任务> [--repos …] [--dry-run]
   （前端、后端、文档各自 ready/land/promote：一个仓库被拦不影响其他仓库）
-操作者：
+  操作者：
   aisk task promote [--repos backend,frontend] [--dry-run]    aisk task verify <任务> --pass|--fail    aisk task archive <任务>
+  direct 仓库：aisk task direct-new <短语> --repo docs --scope <路径> ...；完成用 direct-finish，续做用 direct-resume
+  前后端独立发布控制：personal-push、merge-dev、push-dev；push_pending 由 publish-scheduler 每分钟扫描
   aisk task init [--apply]    aisk task bind [--apply]    aisk task doctor [--fix] [--ack-refs]    aisk task sync    aisk task import-legacy
 任务写法：T042、T042-coupon-claim-lock，或旧槽位号 me/0915-xxx
 """
 
-TASK_LOCKED = {"check", "commit", "ready", "restack", "pause", "archive", "land", "merge-commit", "revert", "verify"}
+TASK_LOCKED = {"check", "commit", "ready", "restack", "pause", "archive", "land", "merge-commit", "revert", "verify",
+               "direct-resume", "direct-finish", "direct-abort", "finish"}
 
 
 def add_tool(p):
@@ -76,6 +79,20 @@ def build_parser():
     p.add_argument("--new-anyway", default="", help="与已有任务相似但确需另开时写理由")
     p.add_argument("--print-path", action="store_true")
 
+    p = cmd("direct-new", direct_tasks.cmd_new, "在配置为 direct 的普通检出上取得单写者租约并登记任务", tool=True)
+    p.add_argument("slug", help="英文任务短语")
+    p.add_argument("--title", required=True)
+    p.add_argument("--repo", required=True)
+    p.add_argument("--goal", required=True)
+    p.add_argument("--accept", required=True)
+    p.add_argument("--scope", action="append", required=True, help="允许改动的仓库相对路径，可重复")
+    p = cmd("direct-resume", direct_tasks.cmd_resume, "续做 direct checkout 任务并核对基线与仓库租约", task=True, tool=True)
+    p.add_argument("--takeover", action="store_true", help="接手空闲 direct 任务")
+    p.add_argument("--reason", default="")
+    p = cmd("direct-finish", direct_tasks.cmd_finish, "校验 direct checkout 范围、提交门禁并按精确策略发布", task=True, tool=True)
+    p.add_argument("-m", "--message", required=True)
+    cmd("direct-abort", direct_tasks.cmd_abort, "仅在干净基线下放弃 direct checkout 任务", task=True)
+
     p = cmd("find", tasks.cmd_find, "按关键词找任务（开新任务前必做）")
     p.add_argument("query", nargs="*")
     p.add_argument("--all", action="store_true", help="含已归档")
@@ -119,6 +136,10 @@ def build_parser():
     p.add_argument("-m", "--message", required=True, help="符合仓库规则的提交说明")
     p = cmd("ready", tasks.cmd_ready, "交付就绪（登记 ready 提交；各仓库各自判定）", task=True, tool=True)
     p.add_argument("--repos", help="只交付这些仓库（逗号分隔）；省略=全部，没过的仓库不拦其他仓库")
+    p = cmd("finish", autoflow.cmd_finish, "前后端单仓自动提交、门禁、落地 fxh、发布 fxh-dev 并回收 worktree", task=True, tool=True)
+    p.add_argument("--repo", required=True, help="只能指定本任务的一个代码仓库")
+    p.add_argument("--path", dest="paths", action="append", default=[], help="本次明确提交的仓库内路径，可重复")
+    p.add_argument("-m", "--message", required=True)
     cmd("restack", tasks.cmd_restack, "rebase 到最新基线", task=True, tool=True)
     p = cmd("land", integrate.cmd_land, "落地到本地集成分支（门禁验证确切的合并提交；各仓库各自判定）", task=True, tool=True)
     p.add_argument("--repos", help="只落这些仓库（逗号分隔）；省略=全部，被拦的仓库不拦其他仓库")
@@ -127,6 +148,20 @@ def build_parser():
     p.add_argument("--repos")
     p.add_argument("--task-id", dest="task_id", default="", help="可选：为推送弹窗补充任务号")
     p.add_argument("--dry-run", action="store_true")
+    for name, fn, label in (
+        ("personal-push", _personal_push, "只推 fxh → fxh-dev，不执行 dev 操作"),
+        ("merge-dev", _merge_dev, "用户命令触发：确认后只快进本地 dev"),
+        ("push-dev", _push_dev, "用户命令触发：确认后只推本地 dev 到 origin/dev"),
+    ):
+        p = cmd(name, fn, label)
+        p.add_argument("--repo", required=True, choices=("be", "web"))
+        p.add_argument("--task-id", default="", help="将确认记录绑定到任务号")
+        p.add_argument("--dry-run", action="store_true")
+
+    cmd("publish-due", publish_scheduler.cmd_publish_due,
+        "运行一次到期的 fxh-dev 重试和升级通知（LaunchAgent 调用）")
+    p = cmd("publish-scheduler", publish_scheduler.cmd_scheduler, "安装/检查/卸载自动发布重试调度器")
+    p.add_argument("scheduler_action", choices=("install", "status", "remove"))
     cmd("sync", integrate.cmd_sync, "加锁抓取远端与 hub")
     p = cmd("verify", integrate.cmd_verify, "登记共享环境验证结论", task=True)
     g = p.add_mutually_exclusive_group(required=True)
@@ -176,6 +211,18 @@ def build_parser():
     p.add_argument("tool")
     p.add_argument("--event", help="钩子输入里不带事件名的工具（Antigravity）由这里指定")
     return ap
+
+
+def _personal_push(cfg, reg, args):
+    return integrate.publish_personal_branch(cfg, reg, args.repo, args=args, dry=args.dry_run)
+
+
+def _merge_dev(cfg, reg, args):
+    return integrate.merge_integration_to_local_dev(cfg, reg, args.repo, args=args, dry=args.dry_run)
+
+
+def _push_dev(cfg, reg, args):
+    return integrate.push_local_dev(cfg, reg, args.repo, args=args, dry=args.dry_run)
 
 
 def main(argv=None, profile=None):

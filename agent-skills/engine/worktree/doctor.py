@@ -42,6 +42,11 @@ def init_problems(cfg: WtConfig, reg: Registry):
     for alias in cfg.repo_order:
         rc = cfg.repo(alias)
         repo = rc.path
+        # Direct repositories use their ordinary checkout and a task-scoped
+        # lease. They have no integration anchor, gate checkout, or hub
+        # transport, so worktree init preflight must not inspect those things.
+        if rc.workspace_mode == "direct":
+            continue
         if not repo.exists():
             problems.append(f"{alias}: 仓库不存在 {repo}")
             continue
@@ -73,13 +78,19 @@ def cmd_init(cfg, reg, args):
         if apply:
             raise WtError("初始化预检未通过，未修改任何仓库或配置")
     if apply:
-        for d in (cfg.tasks_dir, cfg.anchors_dir, cfg.task_state_dir, cfg.locks_dir, cfg.archive_dir, cfg.refs_dir,
-                  cfg.logs_dir, cfg.salvage_dir, cfg.hub):
+        directories = [cfg.tasks_dir, cfg.task_state_dir, cfg.locks_dir, cfg.archive_dir, cfg.refs_dir,
+                       cfg.logs_dir, cfg.salvage_dir]
+        if any(cfg.repo(alias).workspace_mode != "direct" for alias in cfg.repo_order):
+            directories.extend((cfg.anchors_dir, cfg.hub))
+        for d in directories:
             d.mkdir(parents=True, exist_ok=True)
     for alias in cfg.repo_order:
         rc = cfg.repo(alias)
         repo = rc.path
         say("info", f"==== {alias}（{repo}）")
+        if rc.workspace_mode == "direct":
+            say("info", f"{alias} 是 direct 仓库：跳过 anchor/gate/hub 初始化；已有 Aisk worktree 仅作为迁移遗留报告，不自动删除")
+            continue
         if not repo.exists() or git.current_branch(repo) != cfg.integration:
             continue
         wts = git.worktree_list(repo)
@@ -161,6 +172,8 @@ def check_windows_remotes(cfg: WtConfig, rep):
     """Windows 侧的裸对象库：mac 与 hub 两个远端都指向 Y: 上的 Mac 目录，对端搬家后必须改指向。"""
     for alias in cfg.repo_order:
         rc = cfg.repo(alias)
+        if rc.workspace_mode == "direct":
+            continue
         bare = rc.path
         if not bare.exists():
             continue
@@ -180,6 +193,9 @@ def init_windows(cfg, reg, args):  # pragma: no cover - 仅 Windows
     for alias in cfg.repo_order:
         rc = cfg.repo(alias)
         bare = rc.path
+        if rc.workspace_mode == "direct":
+            say("info", f"{alias} 是 direct 仓库：跳过 Windows hub/remote/gate 初始化")
+            continue
         if not rc.mac_source:
             say("err", f"{alias}: Windows 档案需声明 worktrees.repos.{alias}.mac_source")
             continue
@@ -293,6 +309,30 @@ def check_repo(cfg, reg, rep, alias, args):
     if not repo.exists():
         return
     say("info", f"==== {alias}")
+    if rc.workspace_mode == "direct":
+        if cfg.os != "windows":
+            expected = str(rc.automatic.get("commit_branch") or "")
+            if not expected or expected.lower() == "main":
+                rep.err(f"{alias}: direct 仓库缺少安全的 automatic.commit_branch（禁止 main）")
+            else:
+                current = git.current_branch(repo)
+                if current != expected:
+                    rep.err(f"{alias}: direct 普通检出在 {current}，应位于 {expected}；不会自动切分支")
+        # Report legacy Aisk-owned worktrees so operators can plan migration,
+        # but never prune or remove them from direct-mode init/doctor.
+        for w in git.worktree_list(repo):
+            path = Path(w["path"])
+            try:
+                admin = git.admin_dir_of(path) if path.exists() else None
+            except Exception:  # noqa: BLE001  只读迁移提示不能阻断巡检
+                admin = None
+            admin_name = admin.name if admin else ""
+            if (admin_name.startswith((ANCHOR_PREFIX, *names.LEGACY_ANCHOR_ADMIN_PREFIXES,
+                                       names.TASK_ADMIN_PREFIX, *names.LEGACY_TASK_ADMIN_PREFIXES))
+                    or str(path.resolve()).startswith(str(cfg.anchors_dir.resolve()) + "/")
+                    or str(path.resolve()).startswith(str(cfg.tasks_dir.resolve()) + "/")):
+                rep.warn(f"{alias}: direct 仓库仍登记旧 Aisk worktree {path}（迁移遗留；doctor 不会删除）")
+        return
     exts = git.config_regexp(repo, r"^extensions\.", "--local")
     if exts:
         rep.err(f"{alias}: 仓库开着扩展 {exts}（Antigravity 已知不兼容）")
@@ -456,6 +496,9 @@ def check_task(cfg, reg, rep, t):
     if not Path(t["dir"]).exists():
         rep.err(f"{t['id']}: 登记为 {t['state']} 但目录不存在")
         return
+    if t.get("direct_checkout"):
+        check_direct_task(cfg, rep, t)
+        return
     try:
         tasks.require_local(cfg, t)
     except WtError as e:
@@ -478,6 +521,43 @@ def check_task(cfg, reg, rep, t):
     owner = t.get("owner")
     if owner and t["state"] not in LIVE_STATES:
         rep.warn(f"{t['id']}: 状态 {t['state']} 仍登记执行者 {owner.get('tool')}")
+
+
+def check_direct_task(cfg, rep, task):
+    """Read-only validation of an active direct task; no worktree assumptions."""
+    from .. import direct_checkout
+
+    if len(task.get("repos") or {}) != 1:
+        rep.err(f"{task['id']}: direct 任务必须且只能登记一个仓库")
+        return
+    alias, row = next(iter(task["repos"].items()))
+    try:
+        rc = cfg.repo(alias)
+        if rc.workspace_mode != "direct" or Path(row.get("path", "")).resolve() != rc.path.resolve():
+            rep.err(f"{task['id']}/{alias}: direct 任务仓库与档案不匹配")
+            return
+        if task.get("state") in LIVE_STATES:
+            expected = str(rc.automatic.get("commit_branch") or "")
+            baseline = direct_checkout.RepoBaseline.from_dict(row.get("direct_baseline"))
+            lease = direct_checkout.RepoLease(rc.path, owner=task["id"], runtime_root=cfg.data_root)
+            record = lease._read_record()
+            if not record or record.get("owner") != task["id"]:
+                rep.err(f"{task['id']}/{alias}: direct 仓库写 lease 丢失或 owner 不匹配")
+                return
+            root, common_dir, key = direct_checkout._discover_repo(rc.path)
+            branch, head = direct_checkout._branch_and_head(root)
+            if (expected != baseline.branch or branch != expected or row.get("branch") != expected
+                    or head != baseline.head or str(root) != baseline.repo_root
+                    or str(common_dir) != baseline.common_dir or key != baseline.repository_key
+                    or baseline.lease_owner != task["id"] or record.get("repo_root") != str(root)):
+                rep.err(f"{task['id']}/{alias}: direct 仓库分支、HEAD、基线或 lease 与任务不匹配")
+                return
+            changed = direct_checkout._changed_paths(root)
+            outside = [p for p in changed if not direct_checkout._within_scope(p, baseline.allowed_paths)]
+            if outside:
+                rep.err(f"{task['id']}/{alias}: direct 任务越界改动：{'、'.join(outside[:8])}")
+    except Exception as error:  # noqa: BLE001  doctor isolates per-task failures
+        rep.err(f"{task['id']}/{alias}: direct 任务巡检失败：{error}")
 
 
 def check_dirs(cfg, reg, rep):
@@ -573,6 +653,29 @@ def check_retention(cfg: WtConfig, reg: Registry, rep):
                  f"{names.CLI} gc --apply --build-artifacts 可回收")
 
 
+def check_worktree_quotas(cfg: WtConfig, reg: Registry, rep):
+    """Report slot use separately from retention age and disk-budget signals."""
+    snapshot = tasks.worktree_quota_snapshot(cfg, reg)
+    if cfg.quota_active_worktrees:
+        if snapshot["active_total"] >= cfg.quota_active_worktrees:
+            rep.warn(f"活跃任务 worktree {snapshot['active_total']}/{cfg.quota_active_worktrees}，"
+                     "已满时新任务不会物化；不会自动驱逐暂停任务")
+    if cfg.quota_materialized:
+        if snapshot["physical_total"] >= cfg.quota_materialized:
+            rep.warn(f"任务 worktree 物理槽位 {snapshot['physical_total']}/{cfg.quota_materialized}，"
+                     "已满时需先按安全流程释放槽位或查看 gc 预览")
+    for alias in cfg.repo_order:
+        limits = cfg.repo(alias).limits
+        active_limit = limits.get("active_worktrees")
+        physical_limit = limits.get("materialized_worktrees")
+        active_used = snapshot["active_by_repo"].get(alias, 0)
+        physical_used = snapshot["physical_by_repo"].get(alias, 0)
+        if active_limit is not None and active_used >= active_limit:
+            rep.warn(f"仓库 {alias} 活跃 worktree 槽位已满：{active_used}/{active_limit}")
+        if physical_limit is not None and physical_used >= physical_limit:
+            rep.warn(f"仓库 {alias} 物理 worktree 槽位已满：{physical_used}/{physical_limit}")
+
+
 def cmd_doctor(cfg, reg, args):
     rep = Report()
     safely(rep, "数据根", check_data_root, cfg, rep)
@@ -588,6 +691,7 @@ def cmd_doctor(cfg, reg, args):
     live = [t for t in reg.all(include_hub=False) if t["state"] in WORKING_STATES and t.get("os") == cfg.os]
     if len(live) > cfg.quota_active:
         rep.warn(f"进行中的任务 {len(live)} 个，超过配额 {cfg.quota_active}")
+    safely(rep, "worktree 槽位", check_worktree_quotas, cfg, reg, rep)
     safely(rep, "磁盘回收", check_retention, cfg, reg, rep)
     tasks.refresh_board(cfg, reg)
     print()

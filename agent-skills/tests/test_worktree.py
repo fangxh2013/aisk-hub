@@ -159,10 +159,13 @@ class WindowsIntegrationConfig(unittest.TestCase):
                 handoff = Path(task["dir"]) / "HANDOFF.md"
                 handoff.write_text(handoff.read_text(encoding="utf-8").replace("（待填写）", "无"), encoding="utf-8")
                 with contextlib.redirect_stdout(io.StringIO()):
-                    self.assertEqual(run("ready W001 --tool codex --session session-1"), 0)
+                    with patch.object(registry, "confirm_human", return_value=True) as ready_confirm:
+                        self.assertEqual(run("ready W001 --tool codex --session session-1"), 0)
                     with patch.object(registry, "confirm_human", return_value=True) as confirm:
                         self.assertEqual(run("land W001 --tool codex --session session-1"), 0)
 
+                ready_confirm.assert_called_once()
+                self.assertEqual(ready_confirm.call_args.args[1], "确认推送")
                 confirm.assert_called_once()
                 self.assertEqual((integration / "windows.txt").read_text(encoding="utf-8"), "landed only after confirmation\n")
                 self.assertEqual(reg.load("W001")["state"], "landed")
@@ -808,6 +811,8 @@ class SafetyRegression(Sandbox):
 
     def test_promote_pushes_only_tested_head(self):
         remote, _anchor = self.remote()
+        remote_dev_before = git.sha(remote, "refs/heads/dev")
+        local_dev_before = git.sha(self.repo, "refs/heads/dev")
         t = self.new()
         self.commit(t)
         self.ready(t)
@@ -816,11 +821,13 @@ class SafetyRegression(Sandbox):
         (self.repo / "file.txt").write_text("fxh 主工作区仍有用户未提交改动\n")
         with patch.object(registry, "confirm_human", return_value=True) as confirm:
             self.assertEqual(self.run_cmd("promote --repos be"), 0)
-        # fxh-dev 是个人推送面，默认放行；只有最终写入 dev 才弹一次确认框。
-        self.assertEqual(confirm.call_count, 1)
+        # legacy promote 只发布个人分支；本地/远端 dev 必须由独立命令处理。
+        confirm.assert_not_called()
         self.assertTrue(git.dirty(self.repo), "promote 不得吞掉 fxh 主工作区的用户改动")
-        self.assertEqual(git.sha(remote, "dev"), tip)
-        self.assertEqual(self.reg.load(t["id"])["state"], "promoted")
+        self.assertEqual(git.sha(remote, "refs/heads/fxh-dev"), tip)
+        self.assertEqual(git.sha(remote, "refs/heads/dev"), remote_dev_before)
+        self.assertEqual(git.sha(self.repo, "refs/heads/dev"), local_dev_before)
+        self.assertEqual(self.reg.load(t["id"])["state"], "landed")
 
     def test_promote_passes_real_pre_push_hook(self):
         hook_src = os.environ.get("AISK_TEST_PRE_PUSH_HOOK")
@@ -837,31 +844,44 @@ class SafetyRegression(Sandbox):
         self.ready(t)
         self.run_cmd(f"land {t['id']}")
         tip = git.sha(self.repo, "fxh")
-        with patch.object(registry, "confirm_human", return_value=True):
+        remote_dev_before = git.sha(remote, "refs/heads/dev")
+        anchor_dev_before = git.sha(anchor, "HEAD")
+        refs_dev_before = self.reg.load_refs("be").get("dev")
+        with patch.object(registry, "confirm_human", return_value=True) as confirm:
             self.assertEqual(self.run_cmd("promote --repos be"), 0)
-        self.assertEqual(git.sha(remote, "dev"), tip)
-        self.assertEqual(git.sha(anchor, "HEAD"), tip)
-        self.assertEqual(self.reg.load_refs("be").get("dev"), tip)
+        confirm.assert_not_called()
+        self.assertEqual(git.sha(remote, "refs/heads/fxh-dev"), tip)
+        self.assertEqual(git.sha(remote, "refs/heads/dev"), remote_dev_before)
+        self.assertEqual(git.sha(anchor, "HEAD"), anchor_dev_before)
+        self.assertEqual(self.reg.load_refs("be").get("dev"), refs_dev_before)
 
     def test_promote_push_failure_rolls_back_anchor(self):
-        _remote, anchor = self.remote()
+        remote, anchor = self.remote()
         dev_before = git.sha(anchor, "HEAD")
+        remote_dev_before = git.sha(remote, "refs/heads/dev")
+        remote_personal_before = git.sha(remote, "refs/heads/fxh-dev")
+        refs_dev_before = self.reg.load_refs("be").get("dev")
         t = self.new()
         self.commit(t)
         self.ready(t)
         self.run_cmd(f"land {t['id']}")
-        tip = git.sha(self.repo, "fxh")
         orig = git.run
 
         def failing(cmd, *a, **kw):
-            if cmd[:3] == ["push", "origin", "dev"]:
-                raise WtError("injected push network failure")
+            if cmd[:2] == ["push", "origin"] and len(cmd) > 2 and "refs/heads/fxh-dev" in cmd[2]:
+                raise WtError("injected fxh-dev push failure")
             return orig(cmd, *a, **kw)
 
-        with patch.object(registry, "confirm_human", return_value=True), patch.object(git, "run", side_effect=failing):
-            self.assertEqual(self.run_cmd("promote --repos be"), 1)
+        with patch.object(wt_cli, "load_config", return_value=(self.cfg, "测试档案")), \
+             patch.object(registry, "confirm_human", return_value=True) as confirm, \
+             patch.object(git, "run", side_effect=failing):
+            self.assertEqual(wt_cli.main(["promote", "--repos", "be"]), 1)
+        confirm.assert_not_called()
         self.assertEqual(git.sha(anchor, "HEAD"), dev_before)
-        self.assertNotEqual(self.reg.load_refs("be").get("dev"), tip)
+        self.assertEqual(git.sha(remote, "refs/heads/dev"), remote_dev_before)
+        self.assertEqual(git.sha(remote, "refs/heads/fxh-dev"), remote_personal_before)
+        self.assertEqual(self.reg.load_refs("be").get("dev"), refs_dev_before)
+        self.assertEqual(self.reg.load(t["id"])["state"], "landed")
 
     def test_scope_guard_resolves_symlink(self):
         t = self.new()
@@ -1141,6 +1161,21 @@ class GuardsAndHooks(Sandbox):
         with contextlib.redirect_stdout(out):
             guards.main("codex", io.StringIO(json.dumps(outside)))
         self.assertEqual(out.getvalue(), "")
+
+    def test_main_guard_rejects_bulk_push_and_update_ref_stdin_from_non_main(self):
+        self.assertEqual(git.current_branch(self.repo), "fxh")
+        commands = (
+            "git push --all origin",
+            "git push --mirror origin",
+            "git update-ref --stdin",
+        )
+        for command in commands:
+            with self.subTest(command=command), \
+                 patch.object(guards.registry, "confirm_human", return_value=True) as confirm:
+                reason = guards.evaluate(self.outside_payload(command, cwd=self.repo), "codex")
+            self.assertTrue(reason, f"应无条件拒绝 {command}")
+            self.assertIn("Aisk 守卫", reason)
+            confirm.assert_not_called()
 
     def outside_payload(self, command="git push origin master", cwd=None):
         return {"tool_name": "Bash", "cwd": str(cwd or self.root), "session_id": "wb-s1",

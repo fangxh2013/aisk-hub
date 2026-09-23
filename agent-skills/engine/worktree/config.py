@@ -11,6 +11,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .. import profile as profile_mod
 from . import names
@@ -54,6 +55,10 @@ class RepoCfg:
     audited: list = field(default_factory=list)
     # Windows 显式集成模式下，任务裸仓与可写的集成工作区必须分开。
     integration_path: Path = None
+    # direct 仓库复用普通检出；task-worktree 仓库为任务单独物化工作树。
+    workspace_mode: str = "task-worktree"
+    limits: dict = field(default_factory=dict)
+    automatic: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -92,6 +97,8 @@ class WtConfig:
     legacy_admin_globs: list = field(default_factory=list)
     rule_files: list = field(default_factory=list)
     retention: dict = field(default_factory=dict)
+    quota_active_worktrees: int = 0
+    quota_materialized: int = 0
     windows_integration: bool = False
     raw: dict = field(default_factory=dict)
 
@@ -213,6 +220,14 @@ def build_config(prof, os_name=None):
     claimable = int(lease.get("claimable_minutes", 120))
     if not 0 < idle < claimable:
         raise WtError("worktrees.lease 需满足 0 < idle_minutes < claimable_minutes")
+    for quota_name in ("active", "builds", "active_worktrees", "materialized"):
+        if quota_name in quotas:
+            try:
+                quota_value = int(quotas[quota_name])
+            except (TypeError, ValueError) as error:
+                raise WtError(f"worktrees.quotas.{quota_name} 必须为非负整数") from error
+            if quota_value < 0:
+                raise WtError(f"worktrees.quotas.{quota_name} 必须为非负整数")
     hub = wt.get("hub")
     hub = expand(hub) if hub else data_root / "hub"
     branch_prefix = str(wt.get("branch_prefix", "ai/"))
@@ -231,6 +246,97 @@ def build_config(prof, os_name=None):
         rd = _as_map(rd, f"worktrees.repos.{alias}")
         where = f"worktrees.repos.{alias}"
         profile_repo = str(rd.get("profile_repo", alias))
+        workspace_mode = str(rd.get("workspace_mode", "task-worktree"))
+        if workspace_mode not in ("task-worktree", "direct"):
+            raise WtError(f"{where}.workspace_mode 只支持 task-worktree / direct")
+        limits = _as_map(rd.get("limits"), f"{where}.limits")
+        allowed_limits = {"active_worktrees", "materialized_worktrees"}
+        unknown_limits = set(limits) - allowed_limits
+        if unknown_limits:
+            raise WtError(f"{where}.limits 有未知字段：{', '.join(sorted(unknown_limits))}")
+        try:
+            limits = {str(k): int(v) for k, v in limits.items()}
+        except (TypeError, ValueError) as error:
+            raise WtError(f"{where}.limits 的值必须为整数") from error
+        if any(v < 0 for v in limits.values()):
+            raise WtError(f"{where}.limits 不得为负数")
+        automatic = _as_map(rd.get("automatic"), f"{where}.automatic")
+        allowed_auto = {"commit_task_branch", "land_to_local", "push_only", "archive_after_verified_land",
+                        "commit_branch", "push_branch", "publish_pending_policy",
+                        "expected_origin_url"}
+        unknown_auto = set(automatic) - allowed_auto
+        if unknown_auto:
+            raise WtError(f"{where}.automatic 有未知字段：{', '.join(sorted(unknown_auto))}")
+        for key in ("commit_task_branch", "land_to_local", "push_only", "archive_after_verified_land",
+                    "commit_branch", "push_branch"):
+            value = automatic.get(key)
+            if key in ("commit_task_branch", "archive_after_verified_land") and value is not None and not isinstance(value, bool):
+                raise WtError(f"{where}.automatic.{key} 必须为 true 或 false")
+            if key in ("land_to_local", "push_only", "commit_branch", "push_branch") and value is not None:
+                if not isinstance(value, str) or not value.strip():
+                    raise WtError(f"{where}.automatic.{key} 必须为非空分支名")
+        expected_origin_url = automatic.get("expected_origin_url")
+        if expected_origin_url is not None:
+            if (not isinstance(expected_origin_url, str) or not expected_origin_url
+                    or expected_origin_url != expected_origin_url.strip()):
+                raise WtError(f"{where}.automatic.expected_origin_url 必须是单个精确 URL")
+            try:
+                parsed = urlsplit(expected_origin_url)
+                valid_url = (
+                    parsed.scheme.lower() in ("http", "https", "ssh")
+                    and bool(parsed.hostname)
+                    and parsed.username is None and parsed.password is None
+                    and bool(parsed.path.strip("/"))
+                    and not parsed.query and not parsed.fragment
+                    and not any(char.isspace() for char in expected_origin_url)
+                )
+            except ValueError:
+                valid_url = False
+            if not valid_url:
+                raise WtError(f"{where}.automatic.expected_origin_url 含无效或含凭据 URL")
+        publish_policy = _as_map(automatic.get("publish_pending_policy"), f"{where}.automatic.publish_pending_policy")
+        allowed_publish = {"retry_delays_minutes", "needs_attention_after_minutes",
+                           "needs_attention_after_attempts", "blocked_after_minutes",
+                           "retry_only_transient_failures", "notify_deduplication"}
+        unknown_publish = set(publish_policy) - allowed_publish
+        if unknown_publish:
+            raise WtError(f"{where}.automatic.publish_pending_policy 有未知字段：{', '.join(sorted(unknown_publish))}")
+        if publish_policy:
+            delays = publish_policy.get("retry_delays_minutes", [1, 5, 15])
+            if not isinstance(delays, list) or not delays or any(int(v) < 1 for v in delays):
+                raise WtError(f"{where}.automatic.publish_pending_policy.retry_delays_minutes 必须为正整数列表")
+            attention_minutes = int(publish_policy.get("needs_attention_after_minutes", 15))
+            attention_attempts = int(publish_policy.get("needs_attention_after_attempts", 3))
+            blocked_minutes = int(publish_policy.get("blocked_after_minutes", 60))
+            if attention_minutes < 1 or attention_attempts < 1 or blocked_minutes <= attention_minutes:
+                raise WtError(f"{where}.automatic.publish_pending_policy 升级阈值无效")
+        if automatic and workspace_mode == "direct" and "land_to_local" in automatic:
+            raise WtError(f"{where}.automatic: direct 仓库不能配置 land_to_local")
+        if automatic and workspace_mode == "task-worktree" and ("commit_branch" in automatic or "push_branch" in automatic):
+            raise WtError(f"{where}.automatic: task-worktree 仓库不能配置 direct commit_branch/push_branch")
+        if workspace_mode == "direct" and automatic.get("push_branch") and not automatic.get("commit_branch"):
+            raise WtError(f"{where}.automatic.push_branch 需要同时声明 commit_branch")
+        if workspace_mode == "task-worktree" and automatic.get("push_only") and not automatic.get("land_to_local"):
+            raise WtError(f"{where}.automatic.push_only 需要同时声明 land_to_local")
+        branch_targets = [automatic.get(k) for k in ("land_to_local", "push_only", "commit_branch", "push_branch")]
+        if any(str(branch or "").strip().lower() == "main" for branch in branch_targets):
+            raise WtError(f"{where}.automatic 不得把 main 声明为任何写入目标")
+        if automatic.get("land_to_local") or automatic.get("push_only"):
+            if (str(prof.get("project")) != "xinhua" or alias not in ("be", "web")
+                    or workspace_mode != "task-worktree" or automatic.get("land_to_local") != "fxh"
+                    or automatic.get("push_only") != "fxh-dev" or automatic.get("commit_task_branch") is not True):
+                raise WtError(f"{where}.automatic: fxh 自动落地/发布只允许新华 be/web 代码仓库，目标必须为 fxh → fxh-dev")
+            if not expected_origin_url:
+                raise WtError(f"{where}.automatic.expected_origin_url 必须明确列出 fxh-dev 发布目标")
+        if automatic.get("push_branch") == "master":
+            if (str(prof.get("project")) not in ("aisk-hub", "aisk-private") or alias != "main"
+                    or workspace_mode != "direct" or automatic.get("commit_branch") != "master"):
+                raise WtError(f"{where}.automatic.push_branch=master 仅允许 aisk-hub/aisk-private 的 main 仓库 direct master 例外")
+            if not expected_origin_url:
+                raise WtError(f"{where}.automatic.expected_origin_url 必须明确列出 direct master 推送目标")
+        if (str(prof.get("project")) == "xinhua" and alias == "docs" and workspace_mode == "direct"
+                and automatic.get("commit_branch") not in (None, "fxh")):
+            raise WtError(f"{where}.automatic.commit_branch: 新华文档 direct 模式只允许提交本地 fxh")
         promote = str(_req(rd, "promote", where))
         if promote not in ("ff-trunk", "push-only"):
             raise WtError(f"{where}.promote 只支持 ff-trunk / push-only")
@@ -259,6 +365,7 @@ def build_config(prof, os_name=None):
             mac_source=str(rd.get("mac_source") or ""), promote_hint=str(rd.get("promote_hint") or ""),
             audited=_as_list(rd.get("audited"), f"{where}.audited"),
             integration_path=expand(profile_repos[integration_key]) if integration_key else None,
+            workspace_mode=workspace_mode, limits=limits, automatic=dict(automatic),
         )
         both = set(repos[alias].anchors) & set(repos[alias].audited)
         if both:
@@ -305,6 +412,8 @@ def build_config(prof, os_name=None):
         idle_minutes=idle, claimable_minutes=claimable,
         port_base=int(ports.get("base", 20000)), port_block=int(ports.get("block", 10)),
         quota_active=int(quotas.get("active", 8)), quota_builds=int(quotas.get("builds", 2)),
+        quota_active_worktrees=int(quotas.get("active_worktrees", 0)),
+        quota_materialized=int(quotas.get("materialized", 0)),
         sensitive_paths=_as_list(wt.get("sensitive_paths"), "worktrees.sensitive_paths"),
         ai_re=re.compile(str(commit.get("ai_names") or DEFAULT_AI_NAMES), re.I),
         ai_email_re=re.compile(DEFAULT_AI_EMAILS, re.I),
