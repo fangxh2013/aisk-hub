@@ -1063,6 +1063,19 @@ def cmd_commit(cfg, reg, args):
         for alias in aliases:
             intent = task["repos"][alias].get("commit_intent")
             if intent and intent.get("status") == "committed":
+                if getattr(args, "autoflow", False):
+                    # Persist the orchestration checkpoint in the same registry
+                    # write that clears commit_intent. A crash before this save
+                    # remains recoverable through the committed intent above;
+                    # after it, finish can safely resume gates without making
+                    # a duplicate/empty commit.
+                    task["repos"][alias]["autoflow_checkpoint"] = {
+                        "version": 1,
+                        "branch": intent.get("branch"),
+                        "sha": intent.get("post_sha"),
+                        "paths": list(intent.get("paths") or []),
+                        "message": intent.get("message"),
+                    }
                 task["repos"][alias].pop("commit_intent", None)
         if task.get("state") in ("ready", "parked", "rejected"):
             task["owner"] = task.get("owner") or new_owner(cfg, tool, sessions)

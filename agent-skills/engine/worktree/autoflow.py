@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from . import gitops as git, integrate, publish_driver, tasks
+from . import gitops as git, integrate, publish_driver, publish_notify, tasks
 from .config import WtConfig, WtError
 from .registry import Registry, now_iso, say
 
@@ -42,10 +42,12 @@ def _assert_automatic_policy(cfg: WtConfig, task, alias):
     return repo
 
 
-def _call_args(task_id, alias, args):
+def _call_args(task_id, alias, args, *, paths=None, message=None):
     return SimpleNamespace(
-        task=task_id, repos=alias, paths=list(getattr(args, "paths", []) or []),
-        all=False, message=getattr(args, "message", ""), dry_run=False,
+        task=task_id, repos=alias,
+        paths=list(paths if paths is not None else (getattr(args, "paths", []) or [])),
+        all=False, message=(message if message is not None else getattr(args, "message", "")),
+        autoflow=True, dry_run=False,
         tool=getattr(args, "tool", None), session=getattr(args, "session", None),
     )
 
@@ -56,6 +58,71 @@ def _assert_ready_checkpoint(task, alias):
     result = ((task.get("check") or {}).get("results") or {}).get(alias) or {}
     if not ready_sha or not result.get("ok") or result.get("sha") != ready_sha:
         raise WtError(f"{alias} queued/ready 恢复缺少与 ready SHA 一致的通过门禁记录；需先按原任务状态修复，不会重新提交")
+
+
+def _normalized_finish_paths(repo_path, requested, checkpoint=None):
+    """Canonicalize paths before applying task scope and reject repo root."""
+    paths = list(requested or [])
+    if not paths and isinstance(checkpoint, dict):
+        paths = list(checkpoint.get("paths") or [])
+    if not paths:
+        raise WtError("提交前必须逐个声明 --path，避免把任务外或生成文件带入提交")
+    normalized = tasks._commit_paths(repo_path, paths, False)
+    # _commit_paths resolves '..' and symlinks. Check the result, never the
+    # caller's raw string, or e.g. src/.. can become a repository-wide add.
+    if any(path in ("", ".") for path in normalized):
+        raise WtError("finish 的 --path 规范化后指向整个仓库；拒绝提交")
+    return list(dict.fromkeys(normalized))
+
+
+def _checkpoint_for_resume(task_repo, repo_path, branch, requested_paths, requested_message):
+    checkpoint = task_repo.get("autoflow_checkpoint")
+    if checkpoint is None:
+        return None
+    if (not isinstance(checkpoint, dict) or checkpoint.get("version") != 1
+            or checkpoint.get("branch") != branch
+            or not isinstance(checkpoint.get("sha"), str)
+            or not isinstance(checkpoint.get("paths"), list)
+            or not checkpoint.get("paths")
+            or not isinstance(checkpoint.get("message"), str)
+            or not checkpoint.get("message")):
+        raise WtError("自动完成 checkpoint 格式无效；保留现场并停止")
+    if git.current_branch(repo_path) != branch or git.sha(repo_path, "HEAD") != checkpoint["sha"]:
+        raise WtError("任务分支 HEAD 已偏离自动完成 checkpoint；保留现场并停止，请人工核对")
+    dirty = bool(git.dirty(repo_path))
+    if dirty:
+        return None
+    if requested_paths and list(requested_paths) != checkpoint["paths"]:
+        raise WtError("工作区干净但 --path 与已提交 checkpoint 不同；请沿用原路径恢复门禁")
+    if requested_message and requested_message != checkpoint["message"]:
+        raise WtError("工作区干净但提交说明与已提交 checkpoint 不同；请沿用原说明恢复门禁")
+    return checkpoint
+
+
+def _notify_publish_events(cfg, task, alias, row, events):
+    if not events:
+        return False
+    log_path = cfg.state_dir / "publish-notifications.json"
+    operation_key = str(row.get("publish_operation_key") or "")
+    failed = False
+    for event_type in dict.fromkeys(str(event) for event in events):
+        event = {
+            "task_id": str(task["id"]),
+            "alias": alias,
+            "operation_key": operation_key,
+            "type": event_type,
+        }
+        outcome = publish_notify.notify_publish_event(event, log_path=log_path)
+        if outcome.status in ("notified", "duplicate"):
+            if outcome.status == "notified":
+                say("warn" if event_type != "resolved" else "ok",
+                    f"桌面通知已发送：{task['id']} {alias} {event_type}")
+        else:
+            failed = True
+            say("err" if outcome.status == "failed" else "warn",
+                f"桌面通知未送达，事件已保留待重试：{task['id']} {alias} {event_type}"
+                + (f"（{outcome.error}）" if outcome.error else ""))
+    return failed
 
 
 def cmd_finish(cfg: WtConfig, reg: Registry, args):
@@ -78,23 +145,33 @@ def cmd_finish(cfg: WtConfig, reg: Registry, args):
             # without inventing new paths or attempting an empty commit.
             recover_ready = False
     if state in ("active", "parked") or (state == "rejected" and not recover_ready):
-        if not args.paths:
-            raise WtError("提交前必须逐个声明 --path，避免把任务外或生成文件带入提交")
-        if any(str(path).replace("\\", "/").rstrip("/") in ("", ".") for path in args.paths):
-            raise WtError("finish 的 --path 不能指向整个仓库；请列出具体文件或目录")
-        scope = task.get("scope") or []
-        if scope and any(not _covers(path, scope) for path in args.paths):
-            raise WtError("至少一个 --path 超出任务声明 scope；拒绝提交")
         task_repo_path = task["repos"][alias]["path"]
+        row = task["repos"][alias]
+        checkpoint = row.get("autoflow_checkpoint")
+        normalized_paths = _normalized_finish_paths(task_repo_path, args.paths, checkpoint)
+        scope = task.get("scope") or []
+        if scope and any(not _covers(path, scope) for path in normalized_paths):
+            raise WtError("至少一个规范化后的 --path 超出任务声明 scope；拒绝提交")
+        message = str(getattr(args, "message", "") or "").strip()
+        resume_checkpoint = _checkpoint_for_resume(
+            row, task_repo_path, row["branch"], normalized_paths, message,
+        )
+        if resume_checkpoint:
+            message = resume_checkpoint["message"]
+        elif isinstance(checkpoint, dict) and isinstance(checkpoint.get("message"), str):
+            # A prior gate failure may have left new in-scope edits. Reuse the
+            # original commit message when the caller only supplies paths.
+            message = message or checkpoint["message"]
         staged = [p for p in git.out(["diff", "--cached", "--name-only", "-z"], cwd=task_repo_path).split("\0") if p]
-        if any(not _covers(path, args.paths) for path in staged):
+        if any(not _covers(path, normalized_paths) for path in staged):
             raise WtError("任务 worktree 已暂存的文件超出本次 --path；拒绝把它们混入自动提交")
         tool, sessions = tasks.caller(args)
         tasks.refuse_if_foreign(cfg, task, tool, sessions, "自动完成")
-        local = _call_args(task["id"], alias, args)
-        rc = tasks.cmd_commit(cfg, reg, local)
-        if rc:
-            return rc
+        local = _call_args(task["id"], alias, args, paths=normalized_paths, message=message)
+        if not resume_checkpoint:
+            rc = tasks.cmd_commit(cfg, reg, local)
+            if rc:
+                return rc
         rc = tasks.cmd_check(cfg, reg, local)
         if rc:
             say("err", "门禁失败；任务 worktree 保留，修复后重跑 finish")
@@ -150,6 +227,8 @@ def cmd_finish(cfg: WtConfig, reg: Registry, args):
             label = "已阻塞" if event == "blocked" else "需要人工关注" if event == "needs_attention" else "已恢复"
             say("warn" if event != "resolved" else "ok",
                 f"{task['id']} {alias} 发布状态升级：{label}（fxh-dev）")
+        notification_failed = _notify_publish_events(cfg, task, alias, row,
+                                                       getattr(result, "events", ()))
         if remote_sha:
             row["remote_sha"] = remote_sha
         if status:
@@ -159,7 +238,7 @@ def cmd_finish(cfg: WtConfig, reg: Registry, args):
             reg.save(task)
             say("ok", f"{task['id']} 已确认 origin/fxh-dev 包含 {remote_sha[:9]}")
             tasks.refresh_board(cfg, reg)
-            return 0
+            return 1 if notification_failed else 0
         detail = getattr(result, "message", "发布尚未确认")
         row["publish_error"] = str(detail)[:500]
         reg.save(task)

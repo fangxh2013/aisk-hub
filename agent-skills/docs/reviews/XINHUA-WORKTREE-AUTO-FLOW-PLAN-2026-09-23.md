@@ -2,7 +2,7 @@
 
 > 状态：核心实现、离线验收与 macOS 发布重试 LaunchAgent 安装已完成；本机运行证据见 §11。旧 direct 锚点只读盘点，含未提交改动的目录保持原样。
 > 日期：2026-09-23
-> 修订：v1.3；补充实现验收证据、main 写入绕过测试、push 前远端竞态复核与方案评分。
+> 修订：v1.4；补充 active finish 的 scope 规范化、提交后恢复 checkpoint、持久升级通知重放及并发内核状态复核。
 > 目标：前后端任务完成后可靠地进入本地 fxh、自动发布到 fxh-dev 并回收任务 worktree；文档与 aisk 仓库不使用 worktree。
 
 ## 1. 决策摘要
@@ -386,15 +386,18 @@ repos:
 ### 11.1 已完成实现
 
 - 后端、前端按仓库分别使用任务 worktree；活跃与物化配额、direct 仓库单写者租约、精确文件范围提交、崩溃恢复意图、CAS 落地和 post-land 归档已实现。
+- `finish` 先解析 `--path` 的真实仓库内路径，再检查任务 scope；拒绝规范化成仓库根目录的路径及解析到 scope 外的符号链接。提交 checkpoint 与清除 commit intent 在同次登记簿保存中完成，check/ready 失败或进程中断后可验证 HEAD 并续跑，不重复创建空提交。
 - 自动个人推送限制为目标仓库的 `origin/fxh-dev`，推送前会重新核对 origin 身份；自动发布路径不能触及本地或远端 `dev`。发布失败写入持久化 `push_pending`，有限退避重试，超过阈值升级并对通知失败做持久化重放。
+- `finish` 产生的发布升级会先写入 macOS 通知 JSON outbox 再调用通知入口；scheduler 也会从持久 `escalations_emitted` 状态重建通知事件，覆盖“发布状态已保存、进程在入通知日志前退出”的崩溃窗口，重复轮询由通知事件键去重。
 - main 写入护栏覆盖常见 push refspec 与 `update-ref --stdin` 绕过路径；禁止 `--all`/`--mirror`。dev 合并与 dev 推送保留独立命令和人工确认。
 - direct 模式用于新华 docs 与 Aisk 仓库；docs 只提交到本地 `fxh`、不自动推送；`aisk-hub` 和 `aisk-private` 仅按精确仓库 allowlist 自动提交并普通推送 `master`。
 - worktree 槽位配额与已有 retention/gc 并存：槽位满时拒绝新建，不隐式执行 `gc --apply`；GC 安全候选、年龄阈值和磁盘预算仍由现有档案策略管理。
 
 ### 11.2 自动化验收证据
 
-- Aisk-hub 官方 full runner：534 项单元测试通过，1 项跳过、2 项预期失败；进程协议验收 93/93；内核卫生检查与文档漂移检查通过。
+- Aisk-hub 官方 full runner：549 项单元测试通过，1 项跳过、2 项预期失败；进程协议验收 93/93；内核卫生检查与文档漂移检查通过。
 - 使用真实仓库 Git hooks 的协议脚本：94/94 通过。另有定向验收：direct task 20 项、publish driver 18 项、分离发布流程 17 项、配额 13 项、autoflow 恢复 4 项、task hardening 48 项均通过。
+- 本轮新增 `test_autoflow.py`：15 项编排/恢复/安全用例通过；publish worker 6 项与既有 autoflow recovery 4 项通过。覆盖路径穿越及 symlink scope 绕过、门禁失败续跑、通知 outbox 崩溃恢复和幂等送达。
 - 文档路由评估：54 个案例，first-hit 53/54（98.1%），top-three 54/54（100%）。配置解析及五个目标仓的 effective origin 身份检查通过；`git diff --check` 与 Python 编译检查通过。
 - 测试过程中的系统确认弹窗已改为测试内 mock 并断言确认边界；最终 full runner 未弹出真实确认框，也未触发真实仓库推送。
 
@@ -405,3 +408,10 @@ repos:
 - docs 当前 checkout 已处于档案声明的 `fxh` 分支且干净。两个旧 docs 锚点保留；其中 `master` 锚点含已有的用户文档改动，不能作为自动清理对象。direct 模式的任务流程不会使用或删除它们。
 - 当前验收没有合成或执行新华业务仓库的真实 `fxh-dev` 推送，也没有触碰任何 `main`。因此，真实远端保护规则、网络环境和通知中心的端到端送达仍由首次真实任务验证；无待发布任务时不制造一笔业务推送来伪造端到端证据。
 - 方案设计完整性按 §8.1 量表评为 **100/100**；这是设计与离线契约验收分。真实远端运行分不宣称 100 分，须在首次真实后端/前端任务及通知升级中采集证据后另评。
+
+### 11.4 本轮对并发分析的只读核对
+
+- 本轮审查开始时 Aisk-hub HEAD 与 `origin/master` 同为 `e7f411f`，工作区干净；通知、scheduler、direct 与自动流实现已在前序提交中。`7160728` 的 Git 树只有方案文档改动，不含 `autoflow`、`publish_notify`、`publish_scheduler` 或其测试；把它描述成“66→88 项测试后的完整安全版本”不符合当前仓库历史。
+- 审查过程中共享 `master` 新出现本地提交 `1d30d0f`；逐行审阅后确认它仅将已跟踪的 worktree 新测试加入 privacy 发布/扫描白名单。本轮新增的 `test_autoflow.py` 也已精确加入同一白名单并通过 privacy、内核卫生验收；没有丢弃或覆盖这笔并发提交。
+- `~/.aisk/kernel-root` 当前内容为 `/Users/felix/work/aisk-hub/agent-skills`；运行时 xinhua profile 与版本化 profile 的自动策略一致，使用 `expected_origin_url`。本机检查时没有活跃 be/web 任务。
+- 将内核固定到 `7160728` 不能实现完整隔离：`bin/aisk` 会从相邻 aisk-private 仓库解析 profile，并复用 profile 指定的仓库目录与 `~/.aisk-runtime` 任务状态；旧内核也不包含 direct/finish/scheduler 行为。不要把该历史提交作为当前策略的稳定副本。

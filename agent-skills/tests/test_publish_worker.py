@@ -174,7 +174,7 @@ class PublishWorkerTests(unittest.TestCase):
             }, report.events)
             self.assertEqual(reg.rows["T009"]["repos"]["be"]["publish_status"], "blocked")
 
-    def test_blocked_transient_retries_at_hourly_cadence_without_repeating_alert(self):
+    def test_blocked_transient_retries_hourly_and_replays_durable_alert_for_deduplication(self):
         with tempfile.TemporaryDirectory() as temp:
             cfg = FakeConfig(temp)
             reg = FakeRegistry([task("T010")])
@@ -194,10 +194,10 @@ class PublishWorkerTests(unittest.TestCase):
             )
 
             self.assertIn("blocked", [event["type"] for event in blocked.events])
-            self.assertEqual(not_due.events, ())
+            self.assertIn("blocked", [event["type"] for event in not_due.events])
             self.assertEqual(len(publisher.calls), 1)
             self.assertTrue(due.results[0].attempted)
-            self.assertEqual(due.events, ())
+            self.assertIn("blocked", [event["type"] for event in due.events])
 
     def test_recovers_remote_sha_from_published_state_after_task_row_write_crash(self):
         with tempfile.TemporaryDirectory() as temp:

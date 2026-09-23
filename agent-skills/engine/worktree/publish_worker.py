@@ -114,10 +114,26 @@ def _advance_state(store, operation_key, now, policy=None):
     state = store.get(operation_key)
     if state is None:
         return None, ()
+    # The pending state is committed before the scheduler writes its separate
+    # notification log. Replay that durable outbox after a crash in between;
+    # the notification transport deduplicates already delivered events.
+    persisted_events = _persisted_events(state)
     advanced = store.advance(operation_key, now=now, policy=policy)
     if advanced is None:
-        return state, ()
-    return advanced.state, tuple(advanced.events or ())
+        return state, persisted_events
+    return advanced.state, _unique_events(
+        persisted_events + _persisted_events(advanced.state) + tuple(advanced.events or ())
+    )
+
+
+def _persisted_events(state):
+    events = state.get("escalations_emitted", [])
+    if (not isinstance(events, list)
+            or any(not isinstance(event, str)
+                   or event not in ("needs_attention", "blocked", "resolved")
+                   for event in events)):
+        raise ValueError("invalid persisted publish escalation events")
+    return _unique_events(events)
 
 
 def _is_due(state, now, policy=None):
@@ -196,16 +212,6 @@ def run_due_publications(cfg, reg, now=None, publisher=None):
                 or not _policy_allows(cfg, alias)):
             continue
 
-        if (task_repo.get("publish_status") == publish_pending.PUBLISHED
-                and task_repo.get("remote_sha")):
-            results.append(PublicationResult(
-                task_id, alias, operation_key, landed_sha,
-                status=publish_pending.PUBLISHED,
-                remote_sha=str(task_repo["remote_sha"]), attempted=False,
-                skipped_reason="already_published",
-            ))
-            continue
-
         try:
             state, advance_events = _advance_state(
                 store, operation_key, current, retry_policy,
@@ -220,6 +226,16 @@ def run_due_publications(cfg, reg, now=None, publisher=None):
 
         for event in advance_events:
             emitted.append(_event(task_id, alias, operation_key, event))
+
+        if (task_repo.get("publish_status") == publish_pending.PUBLISHED
+                and task_repo.get("remote_sha")):
+            results.append(PublicationResult(
+                task_id, alias, operation_key, landed_sha,
+                status=publish_pending.PUBLISHED,
+                remote_sha=str(task_repo["remote_sha"]), attempted=False,
+                skipped_reason="already_published", events=tuple(advance_events),
+            ))
+            continue
 
         if state and state.get("status") == publish_pending.PUBLISHED:
             confirmed_sha = state.get("remote_sha") or task_repo.get("remote_sha")
@@ -243,6 +259,7 @@ def run_due_publications(cfg, reg, now=None, publisher=None):
                 remote_sha=str(confirmed_sha) if confirmed_sha else None,
                 error=missing_sha_error,
                 attempted=False, skipped_reason="already_published_state",
+                events=tuple(advance_events),
             ))
             continue
 
