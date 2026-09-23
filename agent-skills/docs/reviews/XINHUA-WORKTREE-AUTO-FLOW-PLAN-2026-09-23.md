@@ -414,4 +414,5 @@ repos:
 - 本轮审查开始时 Aisk-hub HEAD 与 `origin/master` 同为 `e7f411f`，工作区干净；通知、scheduler、direct 与自动流实现已在前序提交中。`7160728` 的 Git 树只有方案文档改动，不含 `autoflow`、`publish_notify`、`publish_scheduler` 或其测试；把它描述成“66→88 项测试后的完整安全版本”不符合当前仓库历史。
 - 审查过程中共享 `master` 新出现本地提交 `1d30d0f`；逐行审阅后确认它仅将已跟踪的 worktree 新测试加入 privacy 发布/扫描白名单。本轮新增的 `test_autoflow.py` 也已精确加入同一白名单并通过 privacy、内核卫生验收；没有丢弃或覆盖这笔并发提交。
 - `~/.aisk/kernel-root` 当前内容为 `/Users/felix/work/aisk-hub/agent-skills`；运行时 xinhua profile 与版本化 profile 的自动策略一致，使用 `expected_origin_url`。本机检查时没有活跃 be/web 任务。
+- 发布 worker 的 stderr 留有一条 12:51:53 的历史 SyntaxError，堆栈显示该次启动时 `config.py` 第 56 行存在 Git 冲突标记；本轮复核时文件可编译、工作区干净、LaunchAgent 仍运行，stdout 持续报告没有到期任务，且任务登记簿无活跃任务。该记录证明共享可变内核会受到并发编辑窗口影响；若以后要部署不可变内核，应基于当前已验收版本，并同时明确隔离/绑定 profile 与 runtime，不能只克隆旧的 `7160728`。
 - 将内核固定到 `7160728` 不能实现完整隔离：`bin/aisk` 会从相邻 aisk-private 仓库解析 profile，并复用 profile 指定的仓库目录与 `~/.aisk-runtime` 任务状态；旧内核也不包含 direct/finish/scheduler 行为。不要把该历史提交作为当前策略的稳定副本。
