@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import datetime
 import json
 import os
@@ -28,6 +29,38 @@ TASK_STATES = ("active", "parked", "ready", "queued", "rejected", "landed", "pro
                "reverting", "archived")
 LIVE_STATES = ("active", "parked", "ready", "queued", "rejected")
 WORKING_STATES = ("active", "queued", "rejected")
+
+# TaskDialogIndirect lets Windows name the affirmative action precisely rather
+# than overloading the generic "OK" button.  Keep the declarations here rather
+# than importing a GUI toolkit: the kernel has no third-party UI dependency.
+_WIN_CONFIRM_BUTTON = 1001
+_WIN_CANCEL_BUTTON = 1002
+_TDF_ALLOW_DIALOG_CANCELLATION = 0x0008
+_TDF_SIZE_TO_CONTENT = 0x01000000
+
+
+class _TaskDialogButton(ctypes.Structure):
+    _fields_ = [("nButtonID", ctypes.c_int), ("pszButtonText", ctypes.c_wchar_p)]
+
+
+class _TaskDialogIcon(ctypes.Union):
+    _fields_ = [("hIcon", ctypes.c_void_p), ("pszIcon", ctypes.c_wchar_p)]
+
+
+class _TaskDialogConfig(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint), ("hwndParent", ctypes.c_void_p), ("hInstance", ctypes.c_void_p),
+        ("dwFlags", ctypes.c_uint), ("dwCommonButtons", ctypes.c_uint),
+        ("pszWindowTitle", ctypes.c_wchar_p), ("MainIcon", _TaskDialogIcon),
+        ("pszMainInstruction", ctypes.c_wchar_p), ("pszContent", ctypes.c_wchar_p),
+        ("cButtons", ctypes.c_uint), ("pButtons", ctypes.POINTER(_TaskDialogButton)),
+        ("nDefaultButton", ctypes.c_int), ("cRadioButtons", ctypes.c_uint),
+        ("pRadioButtons", ctypes.POINTER(_TaskDialogButton)), ("nDefaultRadioButton", ctypes.c_int),
+        ("pszVerificationText", ctypes.c_wchar_p), ("pszExpandedInformation", ctypes.c_wchar_p),
+        ("pszExpandedControlText", ctypes.c_wchar_p), ("pszCollapsedControlText", ctypes.c_wchar_p),
+        ("FooterIcon", _TaskDialogIcon), ("pszFooter", ctypes.c_wchar_p),
+        ("pfCallback", ctypes.c_void_p), ("lpCallbackData", ctypes.c_ssize_t), ("cxWidth", ctypes.c_uint),
+    ]
 
 
 def now():
@@ -331,11 +364,67 @@ def remove_tree(path):
         raise WtError(f"没能删除 {path}（残留示例：{'、'.join(left) or path}）；请在普通终端手工确认后重试")
 
 
+def _windows_desktop_available():
+    """只在当前进程能访问交互桌面时显示 Windows 原生确认框。"""
+    try:  # OpenInputDesktop 在服务会话及没有桌面的沙箱中返回空句柄。
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        open_desktop = user32.OpenInputDesktop
+        open_desktop.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        open_desktop.restype = ctypes.c_void_p
+        close_desktop = user32.CloseDesktop
+        close_desktop.argtypes = [ctypes.c_void_p]
+        close_desktop.restype = ctypes.c_int
+        handle = open_desktop(0, False, 0)
+        if not handle:
+            return False
+        close_desktop(handle)
+        return True
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
+def _windows_confirm_label(expect):
+    return expect if str(expect).startswith("确认") else f"确认{expect}"
+
+
+def _confirm_windows_task_dialog(prompt, expect, context):
+    """返回 (是否确认, 审计细节)。原生 API 失败时不降级到终端输入。"""
+    confirm_label = _windows_confirm_label(expect)
+    buttons = (_TaskDialogButton * 2)(
+        _TaskDialogButton(_WIN_CONFIRM_BUTTON, confirm_label),
+        _TaskDialogButton(_WIN_CANCEL_BUTTON, "取消"),
+    )
+    config = _TaskDialogConfig(
+        cbSize=ctypes.sizeof(_TaskDialogConfig),
+        dwFlags=_TDF_ALLOW_DIALOG_CANCELLATION | _TDF_SIZE_TO_CONTENT,
+        pszWindowTitle=context.title,
+        pszMainInstruction=confirm_label,
+        pszContent=prompt,
+        cButtons=len(buttons),
+        pButtons=buttons,
+        nDefaultButton=_WIN_CANCEL_BUTTON,
+        pszFooter=f"风险级别：{context.risk_level}。取消、关闭或无法显示此对话框都不会执行。",
+    )
+    selected = ctypes.c_int(0)
+    try:
+        task_dialog = ctypes.WinDLL("comctl32").TaskDialogIndirect
+        task_dialog.argtypes = [ctypes.POINTER(_TaskDialogConfig), ctypes.POINTER(ctypes.c_int),
+                                ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+        task_dialog.restype = ctypes.c_long
+        result = int(task_dialog(ctypes.byref(config), ctypes.byref(selected), None, None))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False, "windows-task-dialog-unavailable"
+    if result != 0:
+        return False, f"windows-task-dialog-error-{result & 0xffffffff:08x}"
+    return selected.value == _WIN_CONFIRM_BUTTON, "windows-task-dialog"
+
+
 def confirm_human(prompt, expect, context=None, *, action=None, task_id="", session_id="", tool=None,
                   risk_level="HIGH", repository=""):
     """人工确认。
 
-    macOS 使用 AppleScript；Windows 使用当前交互桌面的 PowerShell WinForms。
+    macOS 使用 AppleScript；Windows 使用当前交互桌面的原生 TaskDialog（ctypes 调用
+    comctl32，取代旧版 PowerShell WinForms——后者启动慢、且被部分企业策略禁用脚本执行）。
     两端都保留无图形会话时的 TTY 回退，并且所有失败都拒绝（fail closed）。
     没有环境变量放行开关——测试在进程内替换本函数。
     """
@@ -349,6 +438,13 @@ def confirm_human(prompt, expect, context=None, *, action=None, task_id="", sess
         except ActionContextError:
             # 未知/缺失工具身份必须拒绝，不生成没有归属的系统弹窗。
             return False
+    if IS_WIN:
+        if not _windows_desktop_available():
+            audit(context, "denied", detail="no-interactive-desktop")
+            return False
+        accepted, detail = _confirm_windows_task_dialog(prompt, expect, context)
+        audit(context, "accepted" if accepted else "denied", detail=detail)
+        return accepted
     if not IS_WIN and Path("/usr/bin/osascript").exists():
         text = (prompt + f"\n\n确认请点「{expect}」").replace("\\", "\\\\").replace('"', '\\"')
         title = context.title.replace("\\", "\\\\").replace('"', '\\"')
@@ -365,77 +461,6 @@ def confirm_human(prompt, expect, context=None, *, action=None, task_id="", sess
                 return False
         except (OSError, subprocess.SubprocessError):
             pass
-
-    if IS_WIN:
-        # 不把提示词拼进 PowerShell 命令行：命令行转义在 cmd、PowerShell、Git Bash
-        # 三层之间并不等价。通过一次性子进程环境传值，脚本本身固定且不可注入。
-        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh.exe")
-        if powershell:
-            script = r'''
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$form = New-Object System.Windows.Forms.Form
-$form.Text = $env:AISKHUB_DIALOG_TITLE
-$form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
-$form.TopMost = $true
-$form.Width = 720
-$form.Height = 420
-$form.MinimizeBox = $false
-$form.MaximizeBox = $false
-$form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
-$label = New-Object System.Windows.Forms.Label
-$label.Text = $env:AISKHUB_DIALOG_PROMPT
-$label.AutoSize = $false
-$label.Left = 18
-$label.Top = 18
-$label.Width = 668
-$label.Height = 290
-$label.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10)
-$label.Anchor = 'Top,Left,Right'
-$form.Controls.Add($label)
-$cancel = New-Object System.Windows.Forms.Button
-$cancel.Text = '取消'
-$cancel.Left = 470
-$cancel.Top = 320
-$cancel.Width = 100
-$cancel.Height = 36
-$cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-$form.Controls.Add($cancel)
-$accept = New-Object System.Windows.Forms.Button
-$accept.Text = $env:AISKHUB_DIALOG_EXPECT
-$accept.Left = 585
-$accept.Top = 320
-$accept.Width = 100
-$accept.Height = 36
-$accept.DialogResult = [System.Windows.Forms.DialogResult]::OK
-$form.AcceptButton = $accept
-$form.CancelButton = $cancel
-$form.Controls.Add($accept)
-$result = $form.ShowDialog()
-if ($result -eq [System.Windows.Forms.DialogResult]::OK) { exit 0 }
-exit 1
-'''
-            child_env = os.environ.copy()
-            child_env.update({
-                "AISKHUB_DIALOG_TITLE": context.title,
-                "AISKHUB_DIALOG_PROMPT": f"{prompt}\n\n确认请点击「{expect}」",
-                "AISKHUB_DIALOG_EXPECT": expect,
-            })
-            try:
-                result = subprocess.run(
-                    [powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-STA", "-Command", script],
-                    capture_output=True, text=True, timeout=660, env=child_env,
-                )
-                accepted = result.returncode == 0
-                audit(context, "accepted" if accepted else "denied",
-                      detail="windows-winforms" if accepted else "windows-winforms-denied")
-                return accepted
-            except subprocess.TimeoutExpired:
-                audit(context, "cancelled", detail="windows-dialog-timeout")
-                return False
-            except (OSError, subprocess.SubprocessError) as exc:
-                # 继续走 TTY；GUI 进程通常没有 TTY，随后会按 fail-closed 处理。
-                audit(context, "denied", detail=f"windows-dialog-error:{type(exc).__name__}")
 
     if not sys.stdin.isatty():
         audit(context, "denied", detail="no-interactive-tty")

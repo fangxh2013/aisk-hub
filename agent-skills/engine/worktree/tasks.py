@@ -734,7 +734,11 @@ def cmd_open(cfg, reg, args):
     lines.append(f"步骤：{names.CLI} claim {tid} --tool <工具> --session <本会话标识>（钩子已认领可跳过）→ "
                  f"{names.CLI} note {tid} --done … --next … → 离开前 {names.CLI} pause {tid} --next …")
     if cfg.os == "windows":
-        lines.append(f"本系统不能 land/promote：{names.CLI} check {tid} → 填 HANDOFF.md → {names.CLI} ready {tid}，由 mac 集成端落地")
+        if cfg.windows_integration:
+            lines.append(f"本系统已显式开启集成：{names.CLI} check {tid} → 填 HANDOFF.md → {names.CLI} ready {tid} → "
+                         f"{names.CLI} land {tid}；仅写入档案声明的 integration_repo，系统确认框不可用即拒绝")
+        else:
+            lines.append(f"本系统不能 land/promote：{names.CLI} check {tid} → 填 HANDOFF.md → {names.CLI} ready {tid}，由 mac 集成端落地")
     for line in lines:
         say("info", line)
     return 0

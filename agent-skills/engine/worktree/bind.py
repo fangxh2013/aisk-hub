@@ -124,8 +124,13 @@ def task_values(cfg: WtConfig, task):
                     f'CMD: call "{td / names.ENV_CMD}"；PowerShell: . ' +
                     "'" + str(td / names.ENV_PS1).replace("'", "''") + "'")
         sync_ref, sync_hint = f"mac/{cfg.integration}", "（先执行 `aisk task sync` 拉取 mac 侧最新集成分支）"
-        land_hint = "ready 后由 mac 集成端落地；Windows 本机不能 land/promote。"
-        main_roots = f"`{cfg.data_root / 'repos'}`"
+        if cfg.windows_integration:
+            land_hint = (f"已开启 Windows 集成：ready 后可执行 `aisk task land {task['id']}`；"
+                         "仅会写入档案声明的 integration_repo，确认框不可用或取消时保持不变。")
+            main_roots = "、".join(f"`{cfg.integration_repo(a)}`" for a in task["repos"])
+        else:
+            land_hint = "ready 后由 mac 集成端落地；Windows 本机不能 land/promote。"
+            main_roots = f"`{cfg.data_root / 'repos'}`"
     else:
         env_hint = f"source {td}/{names.ENV_FILE}"
         sync_ref, sync_hint = cfg.integration, ""

@@ -184,7 +184,28 @@ def init_windows(cfg, reg, args):  # pragma: no cover - 仅 Windows
             say("err", f"{alias}: Windows 档案需声明 worktrees.repos.{alias}.mac_source")
             continue
         say("info", f"==== {alias}：{bare}")
+        integration = None
+        if cfg.windows_integration:
+            integration = cfg.integration_repo(alias)
+            if not integration.exists():
+                say("err", f"{alias}: Windows 集成仓库不存在：{integration}")
+                continue
+            if git.current_branch(integration) != cfg.integration:
+                say("err", f"{alias}: Windows 集成仓库必须位于 {cfg.integration}：{integration}")
+                continue
         hub_path = str(cfg.hub / f"{alias}.git").replace("\\", "/")
+        hub = cfg.hub / f"{alias}.git"
+        if not hub.exists():
+            if apply:
+                cfg.hub.mkdir(parents=True, exist_ok=True)
+                git.run(["init", "--bare", "-q", str(hub)])
+                for k, v in (("gc.auto", "0"), ("receive.autogc", "false"),
+                             ("core.logAllRefUpdates", "true"), ("receive.denyDeletes", "false")):
+                    git.run(["config", k, v], cwd=hub)
+            say("ok", f"Windows 交换 hub 裸仓 {'已创建' if apply else '待创建'} → {hub}")
+        elif not (hub / "HEAD").is_file():
+            say("err", f"{alias}: Windows hub 路径不是可用裸仓：{hub}")
+            continue
         if apply:
             safe = git.run(["config", "--global", "--get-all", "safe.directory"], check=False).stdout.splitlines()
             if hub_path not in safe:
@@ -196,25 +217,32 @@ def init_windows(cfg, reg, args):  # pragma: no cover - 仅 Windows
                 say("ok", note)
             if not any(changed):
                 say("ok", "本地裸对象库已存在")
-            continue
-        if apply:
-            git.run(["clone", "--bare", "--no-local", "--no-tags", rc.mac_source, str(bare)])
-            git.run(["remote", "rename", "origin", "mac"], cwd=bare)
-            git.run(["config", "--replace-all", "remote.mac.fetch",
-                     f"+refs/heads/{cfg.integration}:refs/remotes/mac/{cfg.integration}"], cwd=bare)
-            git.run(["config", "--add", "remote.mac.fetch",
-                     f"+refs/remotes/origin/{rc.trunk}:refs/remotes/mac/origin-{rc.trunk}"], cwd=bare)
-            git.run(["config", "remote.mac.pushurl", names.PUSH_DISABLED_URL], cwd=bare)
-            git.run(["remote", "add", "hub", hub_path], cwd=bare)
-            git.run(["config", "remote.hub.push", f"refs/heads/{cfg.branch_prefix}*:refs/heads/{cfg.branch_prefix}*"], cwd=bare)
-            for k, v in (("core.autocrlf", "false"), ("core.longpaths", "true"), ("core.symlinks", "false"),
-                         ("core.filemode", "false"), ("gc.auto", "0")):
-                git.run(["config", k, v], cwd=bare)
-            hooks_path = ((cfg.raw.get("repos") or {}).get(alias) or {}).get("hooks_path")
-            if rc.hooks_required and hooks_path:
-                git.run(["config", "core.hooksPath", str(hooks_path)], cwd=bare)
-            git.run(["fetch", "mac"], cwd=bare)
-        say("ok", f"已从 {rc.mac_source} 建本地裸对象库")
+        else:
+            if apply:
+                git.run(["clone", "--bare", "--no-local", "--no-tags", rc.mac_source, str(bare)])
+                git.run(["remote", "rename", "origin", "mac"], cwd=bare)
+                git.run(["config", "--replace-all", "remote.mac.fetch",
+                         f"+refs/heads/{cfg.integration}:refs/remotes/mac/{cfg.integration}"], cwd=bare)
+                git.run(["config", "--add", "remote.mac.fetch",
+                         f"+refs/remotes/origin/{rc.trunk}:refs/remotes/mac/origin-{rc.trunk}"], cwd=bare)
+                git.run(["config", "remote.mac.pushurl", names.PUSH_DISABLED_URL], cwd=bare)
+                git.run(["remote", "add", "hub", hub_path], cwd=bare)
+                git.run(["config", "remote.hub.push", f"refs/heads/{cfg.branch_prefix}*:refs/heads/{cfg.branch_prefix}*"], cwd=bare)
+                for k, v in (("core.autocrlf", "false"), ("core.longpaths", "true"), ("core.symlinks", "false"),
+                             ("core.filemode", "false"), ("gc.auto", "0")):
+                    git.run(["config", k, v], cwd=bare)
+                hooks_path = ((cfg.raw.get("repos") or {}).get(alias) or {}).get("hooks_path")
+                if rc.hooks_required and hooks_path:
+                    git.run(["config", "core.hooksPath", str(hooks_path)], cwd=bare)
+                git.run(["fetch", "mac"], cwd=bare)
+            say("ok", f"已从 {rc.mac_source} 建本地裸对象库")
+        if integration:
+            gate = cfg.anchor_path(alias, "gate")
+            if not gate.exists():
+                if apply:
+                    git.worktree_add_unique(integration, gate, f"{ANCHOR_PREFIX}{alias}-gate",
+                                            cfg.integration, detach=True, reason="aisk task gate")
+                say("ok", f"Windows 集成门禁区 {'已创建' if apply else '待创建'} → {gate}")
     return 0
 
 

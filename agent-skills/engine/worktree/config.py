@@ -52,6 +52,8 @@ class RepoCfg:
     promote_hint: str = ""
     # 只登记位置、不检出的受保护分支：位置照样审计，但不为它常驻一个工作区
     audited: list = field(default_factory=list)
+    # Windows 显式集成模式下，任务裸仓与可写的集成工作区必须分开。
+    integration_path: Path = None
 
 
 @dataclass
@@ -90,6 +92,7 @@ class WtConfig:
     legacy_admin_globs: list = field(default_factory=list)
     rule_files: list = field(default_factory=list)
     retention: dict = field(default_factory=dict)
+    windows_integration: bool = False
     raw: dict = field(default_factory=dict)
 
     # ---------------------------------------------------------------- 路径
@@ -141,6 +144,17 @@ class WtConfig:
         if alias not in self.repos:
             raise WtError(f"未知仓库别名 {alias}，可用：{', '.join(self.repo_order)}")
         return self.repos[alias]
+
+    def integration_repo(self, alias):
+        """返回实际执行 land/promote 的工作区；Windows 默认没有此权限。"""
+        repo = self.repo(alias)
+        if self.os != "windows":
+            return repo.path
+        if not self.windows_integration:
+            raise WtError("Windows 默认不能执行集成操作；请在 worktrees.windows_integration 显式开启")
+        if not repo.integration_path:
+            raise WtError(f"Windows 集成模式缺少 worktrees.repos.{alias}.integration_repo")
+        return repo.integration_path
 
     def anchor_path(self, alias, name):
         return self.anchors_dir / alias / name
@@ -207,6 +221,11 @@ def build_config(prof, os_name=None):
 
     repos_decl = _as_map(_req(wt, "repos", "worktrees"), "worktrees.repos")
     profile_repos = prof.get("repos") or {}
+    windows_integration = wt.get("windows_integration", False)
+    if isinstance(windows_integration, dict):
+        windows_integration = windows_integration.get("enabled", False)
+    if not isinstance(windows_integration, bool):
+        raise WtError("worktrees.windows_integration 必须是 true 或 false")
     repos = {}
     for alias, rd in repos_decl.items():
         rd = _as_map(rd, f"worktrees.repos.{alias}")
@@ -227,6 +246,11 @@ def build_config(prof, os_name=None):
         gate = _as_map(gate, f"{where}.gate")
         if gate.get("kind", "none") not in ("none", "maven-modules", "npm-build", "command"):
             raise WtError(f"{where}.gate.kind 不支持：{gate.get('kind')}")
+        integration_key = str(rd.get("integration_repo") or "")
+        if os_name == "windows" and windows_integration and not integration_key:
+            raise WtError(f"{where} 在 Windows 集成模式下必须声明 integration_repo")
+        if os_name == "windows" and windows_integration and integration_key not in profile_repos:
+            raise WtError(f"{where}.integration_repo={integration_key} 不在档案 repos 中")
         repos[alias] = RepoCfg(
             alias=alias, path=path, profile_repo=profile_repo,
             trunk=str(_req(rd, "trunk", where)), push_branch=str(_req(rd, "push_branch", where)),
@@ -234,6 +258,7 @@ def build_config(prof, os_name=None):
             hooks_required=bool(rd.get("hooks_required", False)), hooks_path=str(rd.get("hooks_path") or ""),
             mac_source=str(rd.get("mac_source") or ""), promote_hint=str(rd.get("promote_hint") or ""),
             audited=_as_list(rd.get("audited"), f"{where}.audited"),
+            integration_path=expand(profile_repos[integration_key]) if integration_key else None,
         )
         both = set(repos[alias].anchors) & set(repos[alias].audited)
         if both:
@@ -295,6 +320,7 @@ def build_config(prof, os_name=None):
         legacy_admin_globs=_as_list(legacy.get("admin_globs", wt.get("legacy_admin_globs")), "worktrees.legacy.admin_globs"),
         rule_files=_as_list(wt.get("rule_files"), "worktrees.rule_files") or list(DEFAULT_RULE_FILES),
         retention=retention,
+        windows_integration=windows_integration,
         raw=wt,
     )
 

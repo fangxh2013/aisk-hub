@@ -126,6 +126,35 @@ def sync_prompt(alias, integration, trunk, head, cand, changed, summary):
             f"文件：{'、'.join(changed[:20])}")
 
 
+def integration_repo(cfg: WtConfig, alias):
+    """取集成工作区；Windows 只有档案明确授权时才允许写入。"""
+    repo = cfg.integration_repo(alias)
+    if not repo.exists():
+        raise Reject(f"{alias} 集成仓库不存在：{repo}")
+    return repo
+
+
+def task_tip_ref(cfg: WtConfig, task, alias):
+    """Windows 显式集成从 hub 读取任务分支，不把本地裸对象库当成集成工作区。"""
+    use_hub = (cfg.os == "windows" and cfg.windows_integration) or task.get("os") != cfg.os
+    branch = task["repos"][alias]["branch"]
+    return f"refs/remotes/hub/{branch}" if use_hub else branch
+
+
+def fetch_task_refs(cfg: WtConfig, alias, repo):
+    """把任务分支读进集成仓库，不写入共享仓库的远端配置。"""
+    if cfg.os == "windows":
+        source = cfg.hub / f"{alias}.git"
+        if not source.exists():
+            raise Reject(f"Windows 集成找不到 hub 仓库：{source}")
+        refspec = f"+refs/heads/{cfg.branch_prefix}*:refs/remotes/hub/{cfg.branch_prefix}*"
+        result = git.run(["fetch", str(source), "--prune", refspec], cwd=repo, check=False)
+    else:
+        result = git.run(["fetch", "hub", "--prune"], cwd=repo, check=False)
+    if result.returncode != 0:
+        raise Reject(f"{alias} 拉取任务分支失败：{result.stderr.strip()[-300:]}")
+
+
 def ff_anchor_re(cfg: WtConfig):
     return re.compile(rf"^merge (origin/\S+|{re.escape(cfg.integration)}|[0-9a-f]{{7,40}}): Fast-forward$")
 
@@ -219,6 +248,8 @@ def gate_prepare(cfg: WtConfig, alias, cand):
         raise Reject(f"{alias} 缺少门禁区 {gate}（先 aisk task init --apply）")
     if git.dirty(gate):
         raise Reject(f"{alias} 门禁区有残留改动，请检查后恢复：{gate}")
+    if cfg.os == "windows" and cfg.windows_integration:
+        fetch_task_refs(cfg, alias, gate)
     git.run(["checkout", "--detach", cand], cwd=gate)
     git.run(["clean", "-fdq", "-e", "node_modules"], cwd=gate)
     return gate
@@ -243,10 +274,10 @@ def landing_message(cfg, task):
 def plan_landing(cfg: WtConfig, reg: Registry, task, alias, from_hub):
     """单个仓库的落地计划。不满足条件就抛 Reject——只挡这一个仓库，任务里的其他仓库照常落地。"""
     r = task["repos"][alias]
-    repo = cfg.repo(alias).path
+    repo = integration_repo(cfg, alias)
     if not r.get("ready_sha"):
         raise Reject(f"还没有 ready：修好后 {names.CLI} ready {task['id']} --repos {alias}")
-    tip = git.sha(repo, f"refs/remotes/hub/{r['branch']}" if from_hub else r["branch"])
+    tip = git.sha(repo, task_tip_ref(cfg, task, alias) if from_hub else r["branch"])
     if not tip or tip != r["ready_sha"]:
         raise Reject(f"分支头 {str(tip)[:9]} 与 ready 登记 {r['ready_sha'][:9]} 不一致，请重新 {names.CLI} ready")
     head = git.sha(repo, cfg.integration)
@@ -289,9 +320,8 @@ def plan_landing(cfg: WtConfig, reg: Registry, task, alias, from_hub):
 
 def repo_landed(cfg: WtConfig, task, alias):
     """这个仓库的任务提交是否已全部在集成分支里。按提交关系判断，不信登记：没有新提交的仓库天然算已落地。"""
-    r = task["repos"][alias]
-    repo = cfg.repo(alias).path
-    tip = git.sha(repo, f"refs/remotes/hub/{r['branch']}" if task.get("os") != cfg.os else r["branch"])
+    repo = integration_repo(cfg, alias)
+    tip = git.sha(repo, task_tip_ref(cfg, task, alias))
     head = git.sha(repo, cfg.integration)
     return bool(tip and head and git.is_ancestor(repo, tip, head))
 
@@ -302,8 +332,8 @@ def cmd_land(cfg, reg, args):
 
     2026-09-18 T021（后端 + 前端 + 文档）因为文档主工作区有别人的未提交改动，三个仓库一起被拒——
     前后端早已就绪，却要等一个与它们无关的目录。仓库之间不能有这种绑定。"""
-    if cfg.os != "mac":
-        raise WtError("land 只在 mac 集成面执行（Windows 任务 ready 后由 mac 落地）")
+    if cfg.os == "windows" and not cfg.windows_integration:
+        raise WtError("land 默认只在 mac 集成面执行；Windows 请显式配置 worktrees.windows_integration")
     reject_main_target(cfg, cfg.integration)
     dry = args.dry_run
     task = reg.find_by_ref(args.task)
@@ -325,7 +355,7 @@ def cmd_land(cfg, reg, args):
         task = reg.load(tid)  # 加锁后重读，防止两个 land 拿着过期的 ready 记录重复落地
         if task["state"] not in ("ready", "queued", "rejected"):
             raise WtError(f"任务状态已变为 {task['state']}")
-        from_hub = task.get("os") != cfg.os
+        from_hub = (cfg.os == "windows" and cfg.windows_integration) or task.get("os") != cfg.os
         if not from_hub:
             tasks.require_local(cfg, task, ("ready", "queued", "rejected"))
         if task["state"] != "queued" and not dry:
@@ -333,7 +363,7 @@ def cmd_land(cfg, reg, args):
         try:
             if from_hub:
                 for a in aliases:
-                    git.run(["fetch", "hub", "--prune"], cwd=cfg.repo(a).path)
+                    fetch_task_refs(cfg, a, integration_repo(cfg, a))
             plans, blocked = {}, {}
             for alias in aliases:
                 try:
@@ -391,7 +421,7 @@ def cmd_land(cfg, reg, args):
                     raise Reject("未确认落地，集成分支保持不变")
 
             for alias, p in plans.items():
-                repo = cfg.repo(alias).path
+                repo = integration_repo(cfg, alias)
                 r = task["repos"][alias]
                 if p["status"] == "candidate":
                     if git.current_branch(repo) != cfg.integration:
@@ -473,15 +503,16 @@ def required_promotion_task_id(reg, args, alias, repo, head):
 
 
 def cmd_promote(cfg, reg, args):
-    if cfg.os != "mac":
-        raise WtError("promote 只在 mac 集成面执行")
+    if cfg.os == "windows" and not cfg.windows_integration:
+        raise WtError("promote 默认只在 mac 集成面执行；Windows 请显式配置 worktrees.windows_integration")
     aliases = [a.strip() for a in args.repos.split(",")] if args.repos else list(cfg.repo_order)
     rc_all = 0
     for alias in aliases:
         rc = cfg.repo(alias)
-        if not rc.path.exists():
+        repo = integration_repo(cfg, alias)
+        if not repo.exists():
             continue
-        say("info", f"==== {alias}（{rc.path}）")
+        say("info", f"==== {alias}（{repo}）")
         with file_lock(cfg.locks_dir / f"land-{alias}.lock", wait_msg=f"{alias} 有落地正在进行，排队"):
             try:
                 promote_one(cfg, reg, alias, rc, args.dry_run, args=args)
@@ -499,7 +530,7 @@ def promote_one(cfg: WtConfig, reg: Registry, alias, rc, dry, args=None):
     # promote 只读取 cfg.integration 的提交引用并写独立 anchor/远端；fxh 主工作区
     # 可以保留用户未提交改动。真正会改写 fxh 文件的 land 仍在提交前做清洁检查。
     reject_main_target(cfg, cfg.integration, rc.push_branch, *([rc.trunk] if rc.promote == "ff-trunk" else []))
-    repo = rc.path
+    repo = integration_repo(cfg, alias)
     r = git.run(["fetch", "origin", "--prune"], cwd=repo, check=False)
     if r.returncode != 0:
         raise Reject(f"fetch origin 失败：{r.stderr.strip()[-300:]}")
@@ -647,7 +678,8 @@ def mark_promoted(cfg: WtConfig, reg: Registry):
             rc = cfg.repo(alias)
             target = f"origin/{rc.trunk}" if rc.promote == "ff-trunk" else f"origin/{rc.push_branch}"
             ls = r.get("landed_sha") or r.get("ready_sha")  # 没有新提交的仓库没有落地合并，看它交付的提交
-            if not ls or not git.sha(rc.path, target) or not git.is_ancestor(rc.path, ls, target):
+            repo = integration_repo(cfg, alias)
+            if not ls or not git.sha(repo, target) or not git.is_ancestor(repo, ls, target):
                 done = False
                 break
         if done:

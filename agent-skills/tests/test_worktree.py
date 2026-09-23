@@ -44,6 +44,131 @@ def make_profile(root, **overrides):
             "worktrees": wt}
 
 
+class WindowsIntegrationConfig(unittest.TestCase):
+    def test_shared_integration_requires_explicit_opt_in_and_repo_mapping(self):
+        with tempfile.TemporaryDirectory(prefix="wt-win-integration-") as tmp:
+            root = Path(tmp).resolve()
+            profile = make_profile(root, hub=str(root / "hub"), windows_integration=True)
+            profile["repos"]["backend_shared"] = str(root / "shared-backend")
+            profile["worktrees"]["repos"]["be"]["integration_repo"] = "backend_shared"
+
+            cfg = build_config(profile, "windows")
+
+            self.assertTrue(cfg.windows_integration)
+            self.assertEqual(cfg.integration_repo("be"), root / "shared-backend")
+
+    def test_windows_integration_stays_protected_by_default(self):
+        with tempfile.TemporaryDirectory(prefix="wt-win-protected-") as tmp:
+            root = Path(tmp).resolve()
+            profile = make_profile(root, hub=str(root / "hub"))
+            profile["repos"]["backend_shared"] = str(root / "shared-backend")
+            profile["worktrees"]["repos"]["be"]["integration_repo"] = "backend_shared"
+
+            cfg = build_config(profile, "windows")
+
+            with self.assertRaisesRegex(WtError, "默认不能执行集成"):
+                cfg.integration_repo("be")
+
+            with self.assertRaisesRegex(WtError, "默认只在 mac 集成面执行"):
+                integrate.cmd_land(cfg, None, type("Args", (), {"task": "W001", "dry_run": False})())
+            with self.assertRaisesRegex(WtError, "默认只在 mac 集成面执行"):
+                integrate.cmd_promote(cfg, None, type("Args", (), {"repos": None, "dry_run": False})())
+
+    def test_windows_integration_requires_each_repo_mapping(self):
+        with tempfile.TemporaryDirectory(prefix="wt-win-mapping-") as tmp:
+            root = Path(tmp).resolve()
+            profile = make_profile(root, hub=str(root / "hub"), windows_integration=True)
+
+            with self.assertRaisesRegex(WtError, "必须声明 integration_repo"):
+                build_config(profile, "windows")
+
+            profile["worktrees"]["windows_integration"] = "false"
+            with self.assertRaisesRegex(WtError, "必须是 true 或 false"):
+                build_config(profile, "windows")
+
+    def test_windows_init_creates_hub_and_gate_for_explicit_integration(self):
+        with tempfile.TemporaryDirectory(prefix="wt-win-init-") as tmp:
+            root = Path(tmp).resolve()
+            source = root / "mac-source"
+            source.mkdir()
+            git.run(["init", "-q", "-b", "fxh"], cwd=source)
+            (source / "README.md").write_text("baseline\n", encoding="utf-8")
+            git.run(["add", "README.md"], cwd=source)
+            with patch.dict(os.environ, {"GIT_AUTHOR_NAME": "Tester", "GIT_AUTHOR_EMAIL": "tester@example.test",
+                                         "GIT_COMMITTER_NAME": "Tester", "GIT_COMMITTER_EMAIL": "tester@example.test"}):
+                git.run(["commit", "-qm", "feat: 初始化"], cwd=source)
+            git.run(["branch", "dev"], cwd=source)
+            git.run(["update-ref", "refs/remotes/origin/dev", "HEAD"], cwd=source)
+            integration = root / "integration"
+            git.run(["clone", "-q", str(source), str(integration)])
+            profile = make_profile(root, hub=str(root / "hub"), windows_integration=True)
+            profile["worktrees"]["repos"]["be"]["mac_source"] = str(source)
+            profile["repos"]["backend_shared"] = str(integration)
+            profile["worktrees"]["repos"]["be"]["integration_repo"] = "backend_shared"
+            cfg = build_config(profile, "windows")
+
+            with patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(root / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(doctor.init_windows(cfg, Registry(cfg), type("Args", (), {"apply": True})()), 0)
+            self.assertTrue((cfg.hub / "be.git" / "HEAD").is_file())
+            self.assertTrue((cfg.repo("be").path / "HEAD").is_file())
+            self.assertTrue((cfg.anchor_path("be", "gate") / "README.md").is_file())
+            self.assertEqual(Path(git.config_get(cfg.repo("be").path, "remote.hub.url")).resolve(),
+                             (cfg.hub / "be.git").resolve())
+
+    def test_windows_explicit_integration_lands_ready_task_after_confirmation(self):
+        with tempfile.TemporaryDirectory(prefix="wt-win-land-") as tmp:
+            root = Path(tmp).resolve()
+            source = root / "mac-source"
+            source.mkdir()
+            env = {"GIT_CONFIG_GLOBAL": str(root / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
+                   "GIT_AUTHOR_NAME": "Tester", "GIT_AUTHOR_EMAIL": "tester@example.test",
+                   "GIT_COMMITTER_NAME": "Tester", "GIT_COMMITTER_EMAIL": "tester@example.test"}
+            with patch.dict(os.environ, env):
+                git.run(["init", "-q", "-b", "fxh"], cwd=source)
+                (source / "README.md").write_text("baseline\n", encoding="utf-8")
+                git.run(["add", "README.md"], cwd=source)
+                git.run(["commit", "-qm", "feat: 初始化"], cwd=source)
+                git.run(["branch", "dev"], cwd=source)
+                git.run(["update-ref", "refs/remotes/origin/dev", "HEAD"], cwd=source)
+                integration = root / "integration"
+                git.run(["clone", "-q", str(source), str(integration)])
+                profile = make_profile(root, hub=str(root / "hub"), windows_integration=True,
+                                       merge_policy={"confirm_land": True})
+                profile["worktrees"]["repos"]["be"].update(mac_source=str(source), integration_repo="backend_shared")
+                profile["repos"]["backend_shared"] = str(integration)
+                cfg = build_config(profile, "windows")
+                reg = Registry(cfg)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(doctor.init_windows(cfg, reg, type("Args", (), {"apply": True})()), 0)
+
+                parser = wt_cli.build_parser()
+
+                def run(command):
+                    args = parser.parse_args(shlex.split(command))
+                    return args.func(cfg, reg, args)
+
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(run("new windows-native-confirm --title Windows原生确认 --repos be "
+                                         "--goal native-dialog --accept land-after-confirm "
+                                         "--tool codex --session session-1"), 0)
+                task = reg.load("W001")
+                task_repo = Path(task["repos"]["be"]["path"])
+                (task_repo / "windows.txt").write_text("landed only after confirmation\n", encoding="utf-8")
+                git.run(["add", "windows.txt"], cwd=task_repo)
+                git.run(["commit", "-qm", "feat: Windows 集成确认"], cwd=task_repo)
+                handoff = Path(task["dir"]) / "HANDOFF.md"
+                handoff.write_text(handoff.read_text(encoding="utf-8").replace("（待填写）", "无"), encoding="utf-8")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(run("ready W001 --tool codex --session session-1"), 0)
+                    with patch.object(registry, "confirm_human", return_value=True) as confirm:
+                        self.assertEqual(run("land W001 --tool codex --session session-1"), 0)
+
+                confirm.assert_called_once()
+                self.assertEqual((integration / "windows.txt").read_text(encoding="utf-8"), "landed only after confirmation\n")
+                self.assertEqual(reg.load("W001")["state"], "landed")
+
+
 class Sandbox(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="wt-test-")

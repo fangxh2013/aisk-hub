@@ -1,4 +1,5 @@
 import json
+import ctypes
 import os
 import tempfile
 import unittest
@@ -102,3 +103,46 @@ class ActionContextTests(unittest.TestCase):
         self.assertTrue(registry.confirm_human("推送候选", "推送", context=ctx))
         script = run.call_args.args[0][2]
         self.assertIn("git推送-codex｜T042", script)
+
+    def test_windows_task_dialog_names_the_action_and_defaults_to_cancel(self):
+        seen = {}
+
+        class TaskDialog:
+            def __call__(self, config_ptr, selected_ptr, _radio, _verified):
+                config = ctypes.cast(config_ptr, ctypes.POINTER(registry._TaskDialogConfig)).contents
+                seen["title"] = config.pszWindowTitle
+                seen["main"] = config.pszMainInstruction
+                seen["content"] = config.pszContent
+                seen["footer"] = config.pszFooter
+                seen["default"] = config.nDefaultButton
+                seen["buttons"] = [config.pButtons[i].pszButtonText for i in range(config.cButtons)]
+                ctypes.cast(selected_ptr, ctypes.POINTER(ctypes.c_int)).contents.value = registry._WIN_CONFIRM_BUTTON
+                return 0
+
+        class Comctl32:
+            TaskDialogIndirect = TaskDialog()
+
+        ctx = ActionContext("codex", "git推送", "T042", "session-42", risk_level="HIGH")
+        with patch.object(registry.ctypes, "WinDLL", return_value=Comctl32(), create=True):
+            accepted, detail = registry._confirm_windows_task_dialog("be: fxh → origin/fxh，3 个提交", "推送", ctx)
+
+        self.assertTrue(accepted)
+        self.assertEqual(detail, "windows-task-dialog")
+        self.assertEqual(seen["title"], "git推送-codex｜T042")
+        self.assertEqual(seen["main"], "确认推送")
+        self.assertEqual(seen["buttons"], ["确认推送", "取消"])
+        self.assertEqual(seen["default"], registry._WIN_CANCEL_BUTTON)
+        self.assertIn("3 个提交", seen["content"])
+        self.assertIn("风险级别：HIGH", seen["footer"])
+
+    def test_windows_without_interactive_desktop_denies_without_terminal_fallback(self):
+        ctx = ActionContext("codex", "git合并", "T042", "session-42")
+        with patch.object(registry, "IS_WIN", True), \
+                patch.object(registry, "_windows_desktop_available", return_value=False), \
+                patch.object(registry, "_confirm_windows_task_dialog") as dialog, \
+                patch.object(registry, "audit") as audit_log, \
+                patch.object(registry.sys.stdin, "isatty", return_value=True):
+            self.assertFalse(registry.confirm_human("候选合并", "落地", context=ctx))
+
+        dialog.assert_not_called()
+        audit_log.assert_called_once_with(ctx, "denied", detail="no-interactive-desktop")

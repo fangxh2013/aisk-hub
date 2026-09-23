@@ -9,6 +9,9 @@ worktrees:
   data_root: ~/work/example-tasks
   # Windows 档案：data_root 放虚拟机本地盘（如 C:/workspace/example-tasks），并必须声明 hub（Mac 交换库的共享路径）。
   # hub: <shared-exchange-path>
+  # 默认 Windows 只能开发并 ready，由 Mac 集成面 land/promote。若要在 Windows 本机集成，
+  # 必须显式开启，并让每个 integration_repo 指向 repos 中经人工核实的 Windows 本地工作区。
+  # windows_integration: true
   integration_branch: integration
   protected:
     - integration
@@ -45,6 +48,8 @@ worktrees:
   repos:
     backend:
       profile_repo: backend
+      # windows_integration 开启时必填，例如 backend_windows_integration。
+      # integration_repo: backend_windows_integration
       trunk: main
       push_branch: integration
       promote: push-only            # 只推集成分支；合入主干按项目 PR 规则
