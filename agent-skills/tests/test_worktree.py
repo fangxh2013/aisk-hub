@@ -203,6 +203,98 @@ class MergeSafety(Sandbox):
         self.assertTrue(self.reg.load(task["id"])["repos"]["be"]["ready_sha"])
 
 
+class LandGateNarrowing(Sandbox):
+    """落地门禁只拦「主工作区脏文件与本次落地内容相交」，不再逐字节要求干净。
+
+    2026-09-22 实测：`AGENTS.md` 有 9 行用户未提交改动，把与它毫无关系的三个仓库
+    一起挡在了落地之外——上面的 `test_task_commit_is_independent_from_dirty_integration_checkout`
+    已经在验证 fxh 上的脏文件不影响 commit/check/ready，这里补上此前完全没覆盖的 land 这一步。
+    """
+
+    def test_unrelated_dirty_file_does_not_block_land_and_survives(self):
+        task = self.new()
+        self.commit(task)
+        self.ready(task)
+        (self.repo / "draft.md").write_text("与本次落地无关的草稿\n")
+        self.assertEqual(self.run_cmd(f"land {task['id']}"), 0)
+        self.assertEqual(self.reg.load(task["id"])["state"], "landed")
+        self.assertEqual((self.repo / "draft.md").read_text(), "与本次落地无关的草稿\n",
+                         "无关草稿不该被落地流程碰到")
+
+    def test_dirty_file_clashing_with_landed_content_blocks_and_names_it(self):
+        task = self.new()
+        self.commit(task)  # 任务分支把 file.txt 改成 "changed\n"
+        self.ready(task)
+        (self.repo / "file.txt").write_text("fxh 上还没提交的改动\n")
+        with self.assertRaises(integrate.Reject) as ctx:
+            self.run_cmd(f"land {task['id']}")
+        self.assertIn("file.txt", str(ctx.exception))
+        self.assertEqual((self.repo / "file.txt").read_text(), "fxh 上还没提交的改动\n",
+                         "拒绝落地时不能动用户还没提交的内容")
+        # 计划阶段全部仓库被拦，cmd_land 的 `if not plans: raise` 生效，状态与其他
+        # 「彻底落不了地」的既有用例（见 test_land_requires_human_confirmation_before_fast_forward）一致。
+        self.assertEqual(self.reg.load(task["id"])["state"], "rejected")
+
+    def test_unrelated_untracked_file_mixed_with_dirty_still_lands(self):
+        # 先把第二个文件提交进 fxh 基线（任务创建之前），这样任务分支和 fxh 从同一份内容
+        # 分叉，之后单纯编辑它属于「本地未提交改动」，不会被误判成「与落地内容分叉」。
+        (self.repo / "other.txt").write_text("基线内容\n")
+        git.run(["add", "other.txt"], cwd=self.repo)
+        git.run(["commit", "-qm", "chore: 基线补充第二个文件"], cwd=self.repo)
+        task = self.new()
+        self.commit(task)
+        self.ready(task)
+        (self.repo / "other.txt").write_text("无关的已跟踪改动\n")
+        (self.repo / "untracked.md").write_text("从未加入版本库的文件\n")
+        self.assertEqual(self.run_cmd(f"land {task['id']}"), 0)
+        self.assertEqual((self.repo / "other.txt").read_text(), "无关的已跟踪改动\n")
+        self.assertEqual((self.repo / "untracked.md").read_text(), "从未加入版本库的文件\n")
+
+    def test_recheck_still_blocks_new_conflicting_change_after_confirmation(self):
+        """§3.4 的第 1 道保险：确认弹窗和真正快进之间，`file.txt` 出现新冲突仍要拦住。
+
+        这条钉住一个纠正：门禁通过后的复检若照抄「工作区有任何脏文件就拒绝」，会把
+        plan_landing 刚刚放行的无关草稿在这里重新挡一次，等于门禁收窄白做——必须和
+        plan_landing 用同一套「只拦相交」口径，TOCTOU 防护护的是「变了」不是「本来就有」。
+        """
+        self.enable_policy_land_confirm()
+        task = self.new()
+        self.commit(task)
+        self.ready(task)
+        before = git.sha(self.repo, "fxh")
+
+        def confirm_and_conflict(*a, **k):
+            (self.repo / "file.txt").write_text("确认期间冒出来的冲突改动\n")
+            return True
+
+        # 这个仓库在计划阶段通过了（那时还没脏），复检才被拦——不同于全部仓库计划阶段
+        # 就被拒的 test_dirty_file_clashing_with_landed_content_blocks_and_names_it，
+        # cmd_land 这里记 blocked 后继续收尾，返回非零而不是抛异常。
+        with patch.object(registry, "confirm_human", side_effect=confirm_and_conflict):
+            self.assertEqual(self.run_cmd(f"land {task['id']}"), 1)
+        self.assertEqual(git.sha(self.repo, "fxh"), before, "复检失败必须原地不动，不能半途快进")
+        self.assertEqual((self.repo / "file.txt").read_text(), "确认期间冒出来的冲突改动\n",
+                         "拒绝时不能碰用户在确认期间写下的内容")
+
+    def test_recheck_ignores_unrelated_change_appearing_during_confirmation(self):
+        self.enable_policy_land_confirm()
+        task = self.new()
+        self.commit(task)
+        self.ready(task)
+
+        def confirm_and_draft(*a, **k):
+            (self.repo / "draft.md").write_text("确认期间冒出来的无关草稿\n")
+            return True
+
+        with patch.object(registry, "confirm_human", side_effect=confirm_and_draft):
+            self.assertEqual(self.run_cmd(f"land {task['id']}"), 0)
+        self.assertEqual(self.reg.load(task["id"])["state"], "landed")
+        self.assertEqual((self.repo / "draft.md").read_text(), "确认期间冒出来的无关草稿\n")
+
+    def enable_policy_land_confirm(self):
+        self.cfg.raw["merge_policy"] = {"confirm_land": True}
+
+
 class RepoAutonomy(Sandbox):
     """前端、后端、文档各自 ready / land / promote：一个仓库被拦只挡它自己。
 
