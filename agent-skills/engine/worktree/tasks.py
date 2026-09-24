@@ -7,6 +7,7 @@ check / commit / ready / restack / archive / restore / salvage / merge-commit / 
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -78,6 +79,45 @@ def require_local(cfg: WtConfig, task, states=None):
             raise WtError(f"{alias}: {info}，停止操作并先抢救")
         if git.current_branch(path) != r["branch"]:
             raise WtError(f"{alias}: 当前分支不是 {r['branch']}")
+
+
+def land_lock_path(cfg: WtConfig, alias):
+    """落地 / 上主干 / 自动落地共用的仓库锁。`recover_stale_queued` 靠它判断落地进程是否还活着，
+    所以所有持锁点都必须经由这里取路径，不能各自拼字符串。"""
+    return cfg.locks_dir / f"land-{alias}.lock"
+
+
+def recover_stale_queued(cfg: WtConfig, reg: Registry, task):
+    """把没有落地进程在处理的 queued 任务恢复为 rejected，返回最新任务记录。
+
+    land 在等确认弹窗（最长 600 秒）之前就把任务置为 queued；如果进程在这期间被杀
+    （AI 工具命令超时、会话结束、中断），退回 rejected 的清理代码不会执行，任务就永久
+    卡在 queued：commit / ready / pause 全都拒绝，也没有恢复命令，只能手改登记簿，
+    还一直占着活跃槽位。2026-09-24 T028 就这样冻结了 10 小时。
+
+    land 与自动落地都是先拿到本仓库的落地锁、再置 queued，并持锁到状态改走为止；
+    flock 在进程退出时由内核自动释放。所以能非阻塞地拿到本任务**全部**仓库的落地锁，
+    就证明此刻没有进程在落地它——queued 只能是遗留状态。持锁期间重读并改为 rejected
+    （与确认超时的正常失败路径同一终态），land / 自动落地 / finish 都能从 rejected 续跑，
+    已快进的部分由重新 land 的既有核对逻辑处理。任何一把锁拿不到就原样返回：可能正有
+    落地在进行，宁可下次再判，也不在进行中的落地底下改状态。"""
+    if task.get("state") != "queued" or task.get("direct_checkout") or not is_local(cfg, task):
+        return task
+    aliases = [a for a in (task.get("repos") or {}) if a in cfg.repos]
+    if not aliases:
+        return task
+    with contextlib.ExitStack() as stack:
+        for alias in aliases:
+            if not stack.enter_context(file_lock(land_lock_path(cfg, alias), blocking=False)):
+                return task
+        current = reg.load(task["id"])
+        if current.get("state") != "queued":
+            return current
+        reason = "上次落地进程已中断（落地锁无人持有），queued 自动恢复为 rejected；重新 land 会核对已落地部分"
+        current["last_reject"] = {"at": now_iso(), "reason": reason}
+        reg.set_state(current, "rejected", note=reason)
+        say("warn", f"{current['id']}: {reason}")
+        return current
 
 
 # ------------------------------------------------------------------ 活动与租约
@@ -209,6 +249,8 @@ def free_port_block(reg: Registry):
 
 
 ACTIVE_WORKTREE_STATES = ("active", "ready", "queued", "rejected")
+# 槽位按任务状态计，不看会话死活：只停掉 AI 会话，任务仍是 active、仍占槽位。
+FREE_SLOT_HINT = "暂停（aisk task pause）、落地或归档其中一个任务才会释放槽位；只停掉 AI 会话不会释放"
 
 
 def _inside(path, root):
@@ -229,6 +271,7 @@ def worktree_quota_snapshot(cfg: WtConfig, reg: Registry):
     """
     physical = {alias: set() for alias in cfg.repo_order}
     active = {alias: set() for alias in cfg.repo_order}
+    holders = {alias: set() for alias in cfg.repo_order}
     for alias in cfg.repo_order:
         rc = cfg.repo(alias)
         try:
@@ -257,6 +300,7 @@ def worktree_quota_snapshot(cfg: WtConfig, reg: Registry):
                 physical.setdefault(alias, set()).add(path)
                 if is_active:
                     active.setdefault(alias, set()).add(path)
+                    holders.setdefault(alias, set()).add(f"{task['id']}({task.get('state')})")
         for alias in reservations:
             if alias not in cfg.repos or cfg.repo(alias).workspace_mode != "task-worktree":
                 continue
@@ -264,9 +308,11 @@ def worktree_quota_snapshot(cfg: WtConfig, reg: Registry):
             physical.setdefault(alias, set()).add(path)
             if is_active:
                 active.setdefault(alias, set()).add(path)
+                holders.setdefault(alias, set()).add(f"{task['id']}(创建中)")
     return {
         "physical_by_repo": {alias: len(paths) for alias, paths in physical.items()},
         "active_by_repo": {alias: len(paths) for alias, paths in active.items()},
+        "active_holders_by_repo": {alias: sorted(ids) for alias, ids in holders.items()},
         "physical_total": sum(len(paths) for paths in physical.values()),
         "active_total": sum(len(paths) for paths in active.values()),
     }
@@ -284,16 +330,19 @@ def check_quota(cfg: WtConfig, reg: Registry, exclude=None, repos=None, material
     if len(working) >= cfg.quota_active:
         raise WtError(f"本机进行中的任务已达上限 {cfg.quota_active}（档案 worktrees.quotas.active），请先 aisk task pause 或归档")
     snapshot = worktree_quota_snapshot(cfg, reg)
+    holders = snapshot["active_holders_by_repo"]
     wanted = [a for a in (repos or []) if a in cfg.repos and cfg.repo(a).workspace_mode == "task-worktree"]
     projected_active = snapshot["active_total"] + len(wanted)
     if cfg.quota_active_worktrees and projected_active > cfg.quota_active_worktrees:
-        raise WtError(f"活跃任务 worktree 已占 {snapshot['active_total']}/{cfg.quota_active_worktrees} 个；"
-                      f"本次需要 {len(wanted)} 个。请先完成并安全回收任务，或稍后重试")
+        occupied = "、".join(f"{a}:{','.join(ids)}" for a, ids in holders.items() if ids) or "无"
+        raise WtError(f"活跃任务 worktree 已占 {snapshot['active_total']}/{cfg.quota_active_worktrees} 个"
+                      f"（{occupied}）；本次需要 {len(wanted)} 个。{FREE_SLOT_HINT}")
     for alias in wanted:
         limit = cfg.repo(alias).limits.get("active_worktrees")
         used = snapshot["active_by_repo"].get(alias, 0)
         if limit is not None and used + 1 > limit:
-            raise WtError(f"仓库 {alias} 活跃 worktree 已占 {used}/{limit} 个；请先完成并安全回收任务")
+            occupied = "、".join(holders.get(alias) or []) or "无"
+            raise WtError(f"仓库 {alias} 活跃 worktree 已占 {used}/{limit} 个（{occupied}）；{FREE_SLOT_HINT}")
     materializing = [a for a in (materialize if materialize is not None else repos or [])
                      if a in cfg.repos and cfg.repo(a).workspace_mode == "task-worktree"]
     if materializing and cfg.tasks_dir.is_dir():
@@ -673,7 +722,7 @@ def snapshot_worktree(cfg: WtConfig, alias, wt, base_sha, message):
 
 def cmd_pause(cfg, reg, args):
     tool, sessions = caller(args)
-    task = reg.find_by_ref(args.task)
+    task = recover_stale_queued(cfg, reg, reg.find_by_ref(args.task))
     require_local(cfg, task, ("active", "rejected", "parked", "ready"))
     refuse_if_foreign(cfg, task, tool, sessions, "暂停")
     kept = []
@@ -966,7 +1015,7 @@ def cmd_commit(cfg, reg, args):
     if not message:
         raise WtError("提交说明不能为空")
     with reg.lock():
-        task = reg.find_by_ref(args.task)
+        task = recover_stale_queued(cfg, reg, reg.find_by_ref(args.task))
         require_local(cfg, task, ("active", "rejected", "parked", "ready"))
         refuse_if_foreign(cfg, task, tool, sessions, "提交")
         aliases = select_repos(cfg, task, getattr(args, "repos", None))
@@ -1165,7 +1214,7 @@ def cmd_ready(cfg, reg, args):
     没过的仓库保留上一次的 ready 登记：land 还会核对分支头，改过的提交不会被当成已交付。"""
     tool, sessions = caller(args)
     with reg.lock():
-        task = reg.find_by_ref(args.task)
+        task = recover_stale_queued(cfg, reg, reg.find_by_ref(args.task))
         require_local(cfg, task, ("active", "rejected", "parked", "ready"))
         refuse_if_foreign(cfg, task, tool, sessions, "交付")
         aliases = select_repos(cfg, task, getattr(args, "repos", None))

@@ -20,7 +20,7 @@ START = dt.datetime(2026, 9, 23, 10, 0, tzinfo=UTC)
 LANDED_SHA = "a" * 40
 TIP_SHA = "b" * 40
 TASK_BRANCH = "ai/T031-safe-publish"
-REMOTE_URL = "ssh://git.example.invalid/hbxhzt/xinhua-platform.git"
+REMOTE_URL = "ssh://git.example.invalid/example-org/example-platform.git"
 
 
 class FakeGit:
@@ -281,7 +281,7 @@ class PublishDriverTests(unittest.TestCase):
                 self.assertEqual(self.git.push_calls, [])
 
     def test_origin_url_must_match_explicit_alias_profile_identity(self):
-        wrong_url = "http://attacker.example.invalid/hbxhzt/xinhua-platform.git"
+        wrong_url = "http://attacker.example.invalid/example-org/example-platform.git"
         self.git.config["remote.origin.url"] = [wrong_url]
         self.git.fetch_urls = [wrong_url]
         self.git.push_urls = [wrong_url]
@@ -295,7 +295,7 @@ class PublishDriverTests(unittest.TestCase):
         self.assertEqual(self.git.push_calls, [])
 
     def test_origin_change_after_initial_validation_is_persisted_and_never_pushed(self):
-        wrong_url = "http://attacker.example.invalid/hbxhzt/xinhua-platform.git"
+        wrong_url = "http://attacker.example.invalid/example-org/example-platform.git"
         original_is_ancestor = self.git.is_ancestor
 
         def change_origin_after_initial_validation(path, ancestor, descendant):

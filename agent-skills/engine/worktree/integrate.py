@@ -531,7 +531,7 @@ def cmd_land(cfg, reg, args):
 
     with contextlib.ExitStack() as stack:
         for a in aliases:
-            stack.enter_context(file_lock(cfg.locks_dir / f"land-{a}.lock", wait_msg=f"{a} 有别的落地/上主干正在进行，排队"))
+            stack.enter_context(file_lock(tasks.land_lock_path(cfg, a), wait_msg=f"{a} 有别的落地/上主干正在进行，排队"))
         task = reg.load(tid)  # 加锁后重读，防止两个 land 拿着过期的 ready 记录重复落地
         if task["state"] not in ("ready", "queued", "rejected"):
             raise WtError(f"任务状态已变为 {task['state']}")
@@ -683,7 +683,7 @@ def land_automatic(cfg, reg, task, alias):
     if getattr(rc, "workspace_mode", "task-worktree") != "task-worktree":
         raise Reject(f"{alias} 未配置为独立 worktree 仓库，拒绝自动落地")
 
-    with file_lock(cfg.locks_dir / f"land-{alias}.lock", wait_msg=f"{alias} 有落地/上主干正在进行，排队"):
+    with file_lock(tasks.land_lock_path(cfg, alias), wait_msg=f"{alias} 有落地/上主干正在进行，排队"):
         current = reg.load(tid)
         if current.get("state") not in ("ready", "queued", "rejected"):
             raise Reject(f"任务状态 {current.get('state')}，自动落地要求 ready")
@@ -826,7 +826,7 @@ def publish_personal_branch(cfg, reg, alias, args=None, *, dry=False):
     """
     _validate_xinhua_origin(cfg, alias, integration_repo(cfg, alias))
     repo = integration_repo(cfg, alias)
-    with file_lock(cfg.locks_dir / f"land-{alias}.lock", wait_msg=f"{alias} 有落地正在进行，排队"):
+    with file_lock(tasks.land_lock_path(cfg, alias), wait_msg=f"{alias} 有落地正在进行，排队"):
         fetched = git.run(["fetch", "origin", "--prune"], cwd=repo, check=False)
         if fetched.returncode != 0:
             raise Reject(f"fetch origin 失败：{fetched.stderr.strip()[-300:]}")
@@ -886,7 +886,7 @@ def merge_integration_to_local_dev(cfg, reg, alias, args=None, *, dry=False):
     anchor = cfg.anchor_path(alias, "dev")
     _validate_xinhua_origin(cfg, alias, repo)
     _validate_xinhua_origin(cfg, alias, anchor)
-    with file_lock(cfg.locks_dir / f"land-{alias}.lock", wait_msg=f"{alias} 有落地/推送正在进行，排队"):
+    with file_lock(tasks.land_lock_path(cfg, alias), wait_msg=f"{alias} 有落地/推送正在进行，排队"):
         if not anchor.exists() or git.current_branch(anchor) != "dev":
             raise Reject(f"本地 dev 锚点不存在或分支错误：{anchor}")
         if git.dirty(anchor):
@@ -930,7 +930,7 @@ def push_local_dev(cfg, reg, alias, args=None, *, dry=False):
     anchor = cfg.anchor_path(alias, "dev")
     _validate_xinhua_origin(cfg, alias, repo)
     _validate_xinhua_origin(cfg, alias, anchor)
-    with file_lock(cfg.locks_dir / f"land-{alias}.lock", wait_msg=f"{alias} 有落地/推送正在进行，排队"):
+    with file_lock(tasks.land_lock_path(cfg, alias), wait_msg=f"{alias} 有落地/推送正在进行，排队"):
         if not anchor.exists() or git.current_branch(anchor) != "dev":
             raise Reject(f"本地 dev 锚点不存在或分支错误：{anchor}")
         if git.dirty(anchor):
@@ -986,7 +986,7 @@ def cmd_promote(cfg, reg, args):
         if not repo.exists():
             continue
         say("info", f"==== {alias}（{repo}）")
-        with file_lock(cfg.locks_dir / f"land-{alias}.lock", wait_msg=f"{alias} 有落地正在进行，排队"):
+        with file_lock(tasks.land_lock_path(cfg, alias), wait_msg=f"{alias} 有落地正在进行，排队"):
             try:
                 promote_one(cfg, reg, alias, rc, args.dry_run, args=args)
             except Reject as e:

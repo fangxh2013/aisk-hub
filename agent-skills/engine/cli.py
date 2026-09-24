@@ -950,14 +950,19 @@ def cmd_public_scan(args):
 
 def cmd_public_verify(args):
     root = Path(args.root or __import__("os").environ.get("AISK_HUB_ROOT", Path.cwd())).resolve()
-    ok, findings = privacy.verify(root)
+    since = getattr(args, "since", None)
+    ok, findings = privacy.verify(root, since=since)
     if args.json:
-        _out(__import__("json").dumps({"ok": ok, "findings": findings}, ensure_ascii=False, indent=2))
+        _out(__import__("json").dumps({"ok": ok, "since": since, "findings": findings}, ensure_ascii=False, indent=2))
     else:
         _out(f"public-root: {root}")
+        if since:
+            _out(f"范围：merge-base({since}, HEAD)..HEAD 的待发布提交（逐提交检查新增行）")
         if findings:
             for item in findings:
                 _out(f"❌ {item['rule']} {item['path']}:{item['line']}")
+        elif since:
+            _out("✅ 待发布提交未引入默认隐私规则命中（完整历史请运行不带 --since 的 public verify）")
         else:
             _out("✅ 工作树与可达 Git 历史均未发现默认隐私规则命中")
     return 0 if ok else 1
@@ -1147,6 +1152,10 @@ def build_parser():
         q = public_sub.add_parser(name)
         q.add_argument("--root", help="扫描根目录，默认当前 aisk-hub")
         q.add_argument("--json", action="store_true")
+        if name == "verify":
+            q.add_argument("--since", metavar="REV",
+                           help="只检查 merge-base(REV, HEAD)..HEAD 的待发布提交（任务发布门禁用）；"
+                                "不给则扫工作树与完整历史")
         q.set_defaults(func=fn)
     q = public_sub.add_parser("export")
     q.add_argument("--root", help="源目录，默认当前 aisk-hub")

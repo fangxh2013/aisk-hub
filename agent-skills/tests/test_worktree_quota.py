@@ -14,7 +14,7 @@ sys.path.insert(0, str(KERNEL))
 
 from engine.worktree import tasks  # noqa: E402
 from engine.worktree.config import WtError, build_config  # noqa: E402
-from engine.worktree.registry import Registry  # noqa: E402
+from engine.worktree.registry import Registry, file_lock  # noqa: E402
 
 
 def git(repo, *args):
@@ -148,6 +148,55 @@ class WorktreeQuotaTests(unittest.TestCase):
 
         with self.assertRaisesRegex(WtError, "仓库 be 活跃 worktree"):
             self.check_quota(repos=["be"], materialize=[])
+
+    def test_full_slot_message_names_holders_and_the_actions_that_free_one(self):
+        """2026-09-24：槽位满时另一个 AI 建议「停掉一个会话」——那释放不了槽位（按任务状态计）。
+        报错必须点名占位任务，并说清只有暂停/落地/归档才释放。"""
+        self.cfg.repo("be").limits["active_worktrees"] = 1
+        worktree = self.add_worktree("be", "T001")
+        self.save_task("T001", state="queued", repos={"be": {"path": str(worktree)}})
+
+        with self.assertRaises(WtError) as caught:
+            self.check_quota(repos=["be"], materialize=[])
+        message = str(caught.exception)
+        self.assertIn("T001(queued)", message)
+        self.assertIn("aisk task pause", message)
+        self.assertIn("只停掉 AI 会话不会释放", message)
+
+    def queued_task_with_real_worktree(self):
+        worktree = self.add_worktree("be", "T001")
+        return self.save_task("T001", state="queued", repos={
+            "be": {"path": str(worktree), "branch": "ai/T001-be", "ready_sha": "0" * 40}})
+
+    def test_stale_queued_without_a_land_process_recovers_to_rejected(self):
+        """2026-09-24 T028：land 在等确认弹窗时进程被杀，queued 永久残留，commit/ready/pause 全被拒。"""
+        task = self.queued_task_with_real_worktree()
+
+        recovered = tasks.recover_stale_queued(self.cfg, self.reg, task)
+
+        self.assertEqual("rejected", recovered["state"])
+        stored = self.reg.load("T001")
+        self.assertEqual("rejected", stored["state"])
+        self.assertEqual(("queued", "rejected"), (stored["history"][-1]["from"], stored["history"][-1]["to"]))
+        self.assertIn("中断", stored["last_reject"]["reason"])
+        # 恢复后 commit / ready / pause 共用的状态门槛必须放行。
+        tasks.require_local(self.cfg, stored, ("active", "rejected", "parked", "ready"))
+
+    def test_queued_task_is_left_alone_while_a_land_holds_the_lock(self):
+        task = self.queued_task_with_real_worktree()
+
+        with file_lock(tasks.land_lock_path(self.cfg, "be")):
+            untouched = tasks.recover_stale_queued(self.cfg, self.reg, task)
+
+        self.assertEqual("queued", untouched["state"])
+        self.assertEqual("queued", self.reg.load("T001")["state"])
+
+    def test_recovery_ignores_tasks_that_are_not_queued(self):
+        worktree = self.add_worktree("be", "T001")
+        task = self.save_task("T001", state="active", repos={"be": {"path": str(worktree)}})
+
+        self.assertEqual("active", tasks.recover_stale_queued(self.cfg, self.reg, task)["state"])
+        self.assertEqual([], self.reg.load("T001").get("history") or [])
 
     def test_paused_task_still_occupies_global_and_per_repo_physical_slots(self):
         self.cfg.quota_materialized = 1

@@ -323,7 +323,73 @@ def scan_git_history(root: str | Path) -> list[dict]:
     return findings
 
 
-def verify(root: str | Path) -> tuple[bool, list[dict]]:
+_HUNK = re.compile(r"^@@ -\S+ \+(\d+)(?:,\d+)? @@")
+
+
+def scan_since(root: str | Path, since: str) -> list[dict]:
+    """只检查即将发布的提交：merge-base(since, HEAD)..HEAD 里每个提交相对第一父提交新增的行。
+
+    单个任务的发布门禁只该为它自己引入的内容负责。全量历史扫描（scan_git_history）在
+    门禁里会把别的任务早已推送、本任务改不了的历史遗留算到当前任务头上——2026-09-24
+    一次历史泄露就让之后所有内核任务都无法完成。全量扫描仍由 `public verify`（不带
+    --since）与 CI 负责，历史债务照样可见。
+
+    逐提交而非净差异：区间内先加后删的行不在净差异里，但仍会随历史一起发布。
+    规则与逐行判定和全量扫描共用 compile_rules / _hits；任何读不到的情况都失败关闭。
+    """
+    root = Path(root).resolve()
+    try:
+        rules = compile_rules(root)
+    except PrivacyPolicyError as exc:
+        return [_policy_finding(exc)]
+    base = subprocess.run(["git", "-C", str(root), "merge-base", since, "HEAD"],
+                          capture_output=True, text=True)
+    base_sha = base.stdout.strip()
+    if base.returncode != 0 or not base_sha:
+        return [{"rule": "unpublished-range-unknown", "path": since, "line": 0}]
+    log = subprocess.run(
+        ["git", "-C", str(root), "-c", "core.quotePath=false", "log", "--first-parent", "-m", "--no-color",
+         "--no-renames", "--no-ext-diff", "--no-textconv", "-U0", "--src-prefix=a/", "--dst-prefix=b/",
+         "--format=@@@commit %H", f"{base_sha}..HEAD"],
+        capture_output=True, text=True,
+    )
+    if log.returncode != 0:
+        return [{"rule": "git-history-unreadable", "path": ".git", "line": 0}]
+    findings = []
+    commit = path = None
+    in_header = False
+    lineno = 0
+    for raw in log.stdout.splitlines():
+        if raw.startswith("@@@commit "):
+            commit, path, in_header = raw.split(" ", 1)[1].strip(), None, False
+            continue
+        if raw.startswith("diff --git "):
+            path, in_header = None, True
+            continue
+        if raw.startswith("@@ "):
+            in_header = False
+            match = _HUNK.match(raw)
+            lineno = int(match.group(1)) if match else 0
+            continue
+        if in_header:
+            if raw.startswith("+++ "):
+                target = raw[4:]
+                if target.startswith('"') and target.endswith('"'):
+                    target = target[1:-1]
+                path = None if target == "/dev/null" else (target[2:] if target.startswith("b/") else target)
+            continue
+        if raw.startswith("+") and path is not None and commit:
+            if not any(Path(path).match(pattern) for pattern in PUBLIC_EXCLUDE_PATTERNS):
+                for rule_id in _hits(rules, path, raw[1:]):
+                    findings.append({"rule": rule_id, "path": f"{commit[:12]}:{path}", "line": lineno})
+            lineno += 1
+    return findings
+
+
+def verify(root: str | Path, since: str | None = None) -> tuple[bool, list[dict]]:
+    if since:
+        findings = scan_since(root, since)
+        return not findings, findings
     findings = scan(root)
     if any(item.get("rule") == "policy-unreadable" for item in findings):
         # 策略不可读时不再继续，直接失败关闭。
