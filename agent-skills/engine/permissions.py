@@ -225,10 +225,18 @@ def apply_antigravity(plugin_dir=None, dry_run=False):
 
 
 def apply_codex(dry_run=False):
-    return PermissionResult(
-        "codex", "unsupported",
-        "本适配器尚未实现当前 Codex 宿主的权限配置生成，保留现有设置；"
-        "是否支持命令规则以当前宿主工具与官方文档为准")
+    """Codex 的命令规则生成尚未实现（各宿主格式不一，见 docs/ADAPTERS.md 的能力矩阵：
+    Codex 钩子机制标注为"弱依赖 (指令级)"，不像 Claude/WorkBuddy 那样有已验证的原生
+    settings.json 钩子）。但任务外高风险确认钩子这部分格式是确定的——`.codex/hooks.json`
+    的 {hooks: {PreToolUse: [...]}} 结构与 Claude/WorkBuddy 共用（见 bind.py 的
+    claude_like_hooks()，任务目录内已用同一份结构装了很久）；缺的只是任务目录外没有
+    对应的 user 级文件。这里先把这一小块装上，作为 best-effort 补充——Codex 是否真的
+    会读 ~/.codex/hooks.json（而不仅仅是任务目录内的项目级副本）尚未实测验证。"""
+    path = Path.home() / ".codex" / "hooks.json"
+    hook_n, hook_msg = _merge_outside_task_guard_hook(path, "codex", dry_run)
+    if hook_n is None:
+        return PermissionResult("codex", "skip", hook_msg, path)
+    return PermissionResult("codex", "ok", hook_msg, path, hook_n)
 
 
 def _workbuddy_cli_path():
