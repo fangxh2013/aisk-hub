@@ -1516,5 +1516,234 @@ class BindAndCli(Sandbox):
                 self.assertEqual(hygiene.scan(root), [])
 
 
+def version_stamp(minutes=0):
+    import datetime
+    return (datetime.datetime.now() + datetime.timedelta(minutes=minutes)).strftime("%Y%m%d%H%M%S")
+
+
+class DeliveryInterference(Sandbox):
+    """2026-09-24 T028 一天里暴露的任务互相干扰：都来自 worktree 隔离不到的共享物。"""
+
+    def upstream_commit(self, name, content, message):
+        (self.repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (self.repo / name).write_text(content)
+        git.run(["add", name], cwd=self.repo)
+        git.run(["commit", "-qm", message], cwd=self.repo)
+
+    def task_commit(self, task, name, message="feat: 修改内容"):
+        wt = Path(task["repos"]["be"]["path"])
+        (wt / name).parent.mkdir(parents=True, exist_ok=True)
+        (wt / name).write_text("select 1;\n")
+        git.run(["add", name], cwd=wt)
+        git.run(["commit", "-qm", message], cwd=wt)
+        return wt
+
+    def enable_migrations(self):
+        self.cfg.repos["be"].migrations = wt_config._migration_policy(
+            {"paths": ["db/migrations/**"], "timestamp_format": "%Y%m%d%H%M%S"}, "测试")
+
+    def ready_output(self, task):
+        self.fill_handoff(task)
+        self.run_cmd(f"check {task['id']}")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            try:
+                rc = self.run_cmd(f"ready {task['id']}")
+            except WtError:
+                rc = 1
+        return rc, out.getvalue()
+
+    # ---------------------------------------------------------------- 本任务的提交按 git 现状算
+    def test_ready_ignores_upstream_commits_after_raw_rebase(self):
+        task = self.new()
+        wt = self.task_commit(task, "task.txt")
+        # dev 同步带进集成分支的同事提交，说明不合本档案的规则
+        self.upstream_commit("teammate.txt", "x\n", "会员问题修复：核销流水")
+        git.run(["rebase", "-q", "fxh"], cwd=wt)  # AI 直接 rebase，没走 restack
+        rc, text = self.ready_output(task)
+        self.assertEqual(rc, 0, text)
+        saved = self.reg.load(task["id"])
+        self.assertEqual(saved["state"], "ready")
+        self.assertEqual(saved["repos"]["be"]["base_sha"], git.sha(self.repo, "fxh"), "登记的基线要跟上 git 现状")
+
+    def test_ready_still_rejects_task_own_bad_message(self):
+        task = self.new()
+        self.task_commit(task, "task.txt", message="改了点东西")
+        rc, text = self.ready_output(task)
+        self.assertEqual(rc, 1)
+        self.assertIn("be: 提交", text, "任务自己的不合规提交照样要拦")
+        self.assertEqual(self.reg.load(task["id"])["state"], "active")
+
+    def test_land_conflict_hint_points_to_restack(self):
+        task = self.new()
+        self.commit(task, content="任务侧改动\n")
+        self.ready(task)
+        self.upstream_commit("file.txt", "集成分支同一行改动\n", "fix: 集成分支同一行改动")
+        with self.assertRaises(integrate.Reject) as ctx:
+            self.run_cmd(f"land {task['id']}")
+        self.assertIn(f"restack {task['id']}", str(ctx.exception))
+        self.assertNotIn("git rebase", str(ctx.exception))
+
+    # ---------------------------------------------------------------- 门禁环境与门禁区
+    def test_gate_env_drops_host_injections(self):
+        shim = "/Applications/Host.app/Contents/Resources/app.asar.unpacked/vendor/shim/safe-bin"
+        source = {
+            "PATH": os.pathsep.join([shim, "/usr/bin", "/bin"]), "HOME": "/h", "LANG": "C.UTF-8", "LC_ALL": "C",
+            "NODE_OPTIONS": "--require /x/shim.cjs", "BASH_ENV": "/x/env.sh", "PYTHONPATH": "/x/site",
+            "CODEBUDDY_BROKERED_BIN_DIR": "/x/bin", "npm_config_registry": "https://registry.example.test",
+            "npm_config_node_options": "--require /x/shim.cjs", "AISK_TASK": "T001", "CUSTOM_FLAG": "1",
+            "GIT_DIR": "/elsewhere/.git",
+        }
+        self.cfg.raw["gate_env"] = {"passthrough": ["CUSTOM_FLAG"]}
+        env = gates.gate_env(self.cfg, source)
+        for dropped in ("NODE_OPTIONS", "BASH_ENV", "PYTHONPATH", "CODEBUDDY_BROKERED_BIN_DIR",
+                        "npm_config_node_options", "GIT_DIR"):
+            self.assertNotIn(dropped, env)
+        for kept in ("HOME", "LANG", "LC_ALL", "npm_config_registry", "AISK_TASK", "CUSTOM_FLAG"):
+            self.assertIn(kept, env)
+        self.assertEqual(env["PATH"].split(os.pathsep), ["/usr/bin", "/bin"])
+
+    def test_gate_does_not_inherit_caller_injections(self):
+        dump = self.root / "gate-env.json"
+        self.cfg.repos["be"].gate = {"kind": "command", "argv": [
+            sys.executable, "-c", f"import json, os; json.dump(dict(os.environ), open({str(dump)!r}, 'w'))"]}
+        with patch.dict(os.environ, {"NODE_OPTIONS": "--require /x/shim.cjs", "BASH_ENV": "/x/env.sh"}):
+            ok, _summary = gates.run_gate(self.cfg, "be", self.root, ["file.txt"], self.root / "gate.log")
+        self.assertTrue(ok)
+        seen = json.loads(dump.read_text())
+        self.assertNotIn("NODE_OPTIONS", seen)
+        self.assertNotIn("BASH_ENV", seen)
+        self.assertEqual(seen.get("HOME"), os.environ["HOME"])
+
+    def test_gate_prepare_clears_ignored_build_output_but_keeps_dependencies(self):
+        self.upstream_commit(".gitignore", "dist/\nnode_modules/\n", "chore: 忽略构建产物")
+        gate = integrate.gate_prepare(self.cfg, "be", git.sha(self.repo, "fxh"))
+        (gate / "dist").mkdir()
+        (gate / "dist" / "old.js").write_text("上一次落地的产物\n")
+        (gate / "node_modules").mkdir()
+        (gate / "node_modules" / "keep.txt").write_text("依赖缓存\n")
+        self.upstream_commit("file.txt", "next\n", "feat: 下一次落地")
+        integrate.gate_prepare(self.cfg, "be", git.sha(self.repo, "fxh"))
+        self.assertFalse((gate / "dist").exists(), "上一次落地的构建产物必须清掉")
+        self.assertTrue((gate / "node_modules" / "keep.txt").exists(), "依赖缓存保留")
+
+    # ---------------------------------------------------------------- 迁移版本顺序
+    def test_ready_rejects_older_migration_and_plans_ordered_rename(self):
+        self.enable_migrations()
+        self.upstream_commit(f"db/migrations/order/V{version_stamp(-60)}__upstream.sql", "select 1;\n",
+                             "feat: 集成分支已有迁移")
+        task = self.new()
+        first, second = version_stamp(-120), version_stamp(-30)
+        self.task_commit(task, f"db/migrations/order/V{first}__first.sql", message="feat: 任务迁移一")
+        self.task_commit(task, f"db/migrations/order/V{second}__second.sql", message="feat: 任务迁移二")
+        rc, text = self.ready_output(task)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"V{first}__first.sql", text)
+        moves = [line.split() for line in text.splitlines() if line.strip().startswith("git mv")]
+        self.assertEqual([m[2].rsplit("/", 1)[-1] for m in moves],
+                         [f"V{first}__first.sql", f"V{second}__second.sql"], "同组新增迁移整体改名")
+        targets = [m[3].rsplit("/", 1)[-1] for m in moves]
+        self.assertEqual(targets, sorted(targets), "改名后保持原相对顺序")
+        self.assertTrue(all(t > f"V{version_stamp(-60)}" for t in targets))
+
+    def test_land_rejects_when_integration_gets_newer_migration_after_ready(self):
+        self.enable_migrations()
+        task = self.new()
+        self.task_commit(task, f"db/migrations/order/V{version_stamp(-60)}__mine.sql", message="feat: 任务迁移")
+        self.ready(task)
+        self.assertEqual(self.reg.load(task["id"])["state"], "ready")
+        self.upstream_commit(f"db/migrations/order/V{version_stamp(-30)}__theirs.sql", "select 1;\n",
+                             "feat: 别的任务先落地的迁移")
+        before = git.sha(self.repo, "fxh")
+        with self.assertRaises(integrate.Reject) as ctx:
+            self.run_cmd(f"land {task['id']}")
+        self.assertIn("迁移版本顺序", str(ctx.exception))
+        self.assertEqual(git.sha(self.repo, "fxh"), before)
+
+    def test_fresh_migrations_and_other_directories_land(self):
+        self.enable_migrations()
+        self.upstream_commit(f"db/migrations/order/V{version_stamp(-30)}__order.sql", "select 1;\n",
+                             "feat: 订单库迁移")
+        task = self.new()
+        # 另一个目录是另一个库，各自排序
+        self.task_commit(task, f"db/migrations/goods/V{version_stamp(-120)}__goods.sql", message="feat: 商品库迁移")
+        self.task_commit(task, f"db/migrations/order/V{version_stamp(0)}__order_new.sql", message="feat: 订单库新迁移")
+        self.ready(task)
+        self.assertEqual(self.run_cmd(f"land {task['id']}"), 0)
+        self.assertEqual(self.reg.load(task["id"])["state"], "landed")
+
+    def test_future_timestamp_version_is_rejected(self):
+        self.enable_migrations()
+        task = self.new()
+        self.task_commit(task, f"db/migrations/order/V{version_stamp(90)}__future.sql", message="feat: 手写的整点版本")
+        rc, text = self.ready_output(task)
+        self.assertEqual(rc, 1)
+        self.assertIn("未来时间", text)
+
+    def test_migration_and_gate_env_profile_keys_are_validated(self):
+        prof = make_profile(self.root)
+        prof["worktrees"]["repos"]["be"]["migrations"] = {"paths": ["db/migrations/**"],
+                                                          "timestamp_format": "%Y%m%d%H%M%S"}
+        prof["worktrees"]["gate_env"] = {"passthrough": ["CUSTOM_FLAG"], "path_exclude": ["*/shim/*"]}
+        cfg = build_config(prof, "mac")
+        self.assertEqual(cfg.repo("be").migrations["group"], "directory")
+        self.assertEqual(build_config(make_profile(self.root), "mac").repo("be").migrations, {})
+        for bad in ({"paths": []}, {"paths": ["db/**"], "version": r"^V\d+__"},
+                    {"paths": ["db/**"], "group": "schema"}, {"paths": ["db/**"], "surprise": 1}):
+            with self.subTest(bad=bad), self.assertRaises(WtError):
+                wt_config._migration_policy(bad, "测试")
+        prof["worktrees"]["gate_env"] = {"passthrough": ["BAD NAME"]}
+        with self.assertRaises(WtError):
+            build_config(prof, "mac")
+
+
+class AddRepoAdmission(Sandbox):
+    """补挂仓库等于新开一份 worktree：拆分规则、同一件事查重、范围重叠、槽位配额都要过。"""
+
+    def setUp(self):
+        super().setUp()
+        self.prof["repos"]["frontend"] = str(self.root / "main" / "frontend")
+        self.prof["worktrees"]["repos"]["web"] = {"profile_repo": "frontend", "trunk": "dev", "push_branch": "fxh-dev",
+                                                  "promote": "ff-trunk", "anchors": ["dev"], "gate": {"kind": "none"}}
+        self.cfg = build_config(self.prof, "mac")
+        loader = patch.object(wt_config, "load_config", return_value=(self.cfg, "测试档案"))
+        loader.start()
+        self.addCleanup(loader.stop)
+        self.reg = Registry(self.cfg)
+        self.web = self.cfg.repo("web").path
+        self.web.mkdir(parents=True)
+        git.run(["init", "-q", "-b", "fxh"], cwd=self.web)
+        (self.web / "app.js").write_text("baseline\n")
+        git.run(["add", "."], cwd=self.web)
+        git.run(["commit", "-qm", "feat: 初始化"], cwd=self.web)
+
+    def test_add_repo_points_to_existing_task_for_same_work(self):
+        self.run_cmd("new customer-reissue-frontend --title 客服补发前端重构 --repos web --goal 目标 --accept 验收")
+        task = self.new("customer-reissue-backend", "客服补发后端重构", "--new-anyway 前后端拆成两个任务")
+        with self.assertRaises(WtError) as ctx:
+            self.run_cmd(f"add-repo {task['id']} web")
+        self.assertIn("客服补发前端重构", str(ctx.exception))
+        self.assertNotIn("web", self.reg.load(task["id"])["repos"])
+        self.assertEqual(self.run_cmd(f"add-repo {task['id']} web --new-anyway 前端任务已放弃"), 0)
+        self.assertIn("web", self.reg.load(task["id"])["repos"])
+
+    def test_add_repo_respects_worktree_quota(self):
+        self.run_cmd("new web-only-demo --title 前端页面调整 --repos web --goal 目标 --accept 验收")
+        self.cfg.repo("web").limits["materialized_worktrees"] = 1
+        task = self.new()
+        with self.assertRaises(WtError) as ctx:
+            self.run_cmd(f"add-repo {task['id']} web")
+        self.assertIn("物理 worktree", str(ctx.exception))
+        self.assertNotIn("web", self.reg.load(task["id"])["repos"])
+        self.assertFalse(git.branch_exists(self.web, self.cfg.task_branch(task["name"])))
+
+    def test_add_repo_keeps_split_rule_of_new(self):
+        task = self.new()
+        self.cfg.profile_name = "xinhua"
+        with self.assertRaises(WtError) as ctx:
+            self.run_cmd(f"add-repo {task['id']} web")
+        self.assertIn("独立任务", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

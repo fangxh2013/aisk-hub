@@ -23,6 +23,70 @@ from .config import IS_WIN, WtConfig, WtError
 from .registry import atomic_json, now_iso, semaphore
 
 
+# 门禁只继承这些环境变量：不管是 WorkBuddy、Codex 还是 Claude 调用的 aisk task，门禁拿到的都是同一份环境。
+# 2026-09-24 T051/T053：WorkBuddy 往 Node 进程注入的删除保护垫片随环境进了门禁，把 vite 清空 dist
+# 当成批量删除拦下，同一提交换个调用方就能过——门禁结果不能取决于是谁在跑。
+GATE_ENV_NAMES = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP", "LANG", "LANGUAGE", "TERM", "TZ",
+    # Windows 下 cmd、npm.cmd、mvn.cmd 离了这些起不来
+    "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "USERNAME", "USERDOMAIN", "APPDATA",
+    "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)", "HOMEDRIVE", "HOMEPATH", "COMPUTERNAME", "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE", "OS",
+    # 代理与证书：内网镜像、公司代理
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    # 工具链
+    "JAVA_HOME", "JAVA_TOOL_OPTIONS", "MAVEN_OPTS", "MAVEN_ARGS", "M2_HOME", "MAVEN_HOME",
+    "NVM_DIR", "NVM_BIN", "VOLTA_HOME", "PNPM_HOME",
+    "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+})
+GATE_ENV_PREFIXES = ("LC_", "AISK", "npm_config_", "NPM_CONFIG_", "YARN_", "COREPACK_")
+# 预加载脚本与动态库注入：即使命中上面的名单或前缀也一律去掉。
+GATE_ENV_DROP = frozenset({
+    "NODE_OPTIONS", "npm_config_node_options", "NPM_CONFIG_NODE_OPTIONS", "NODE_REPL_EXTERNAL_MODULE",
+    "ELECTRON_RUN_AS_NODE", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES",
+})
+# PATH 里宿主工具塞进来的包装目录（比如替换 rm 的安全删除包装）。Electron 应用解包出来的
+# vendor 目录里不会有构建工具链，门禁一律不用。
+GATE_PATH_EXCLUDE = ("*/app.asar.unpacked/*",)
+
+
+def _env_key(name):
+    return name.upper() if IS_WIN else name
+
+
+_GATE_NAMES = frozenset(_env_key(n) for n in GATE_ENV_NAMES)
+_GATE_PREFIXES = tuple(_env_key(p) for p in GATE_ENV_PREFIXES)
+_GATE_DROP = frozenset(_env_key(n) for n in GATE_ENV_DROP)
+
+
+def gate_env(cfg=None, source=None):
+    """门禁子进程的环境：白名单 + 档案 `worktrees.gate_env.passthrough`，去掉注入类变量，PATH 去掉宿主包装目录。"""
+    source = os.environ if source is None else source
+    policy = (getattr(cfg, "raw", None) or {}).get("gate_env") or {}
+
+    def listed(key):
+        value = policy.get(key) or []
+        return [value] if isinstance(value, str) else [str(v) for v in value]
+
+    extra = {_env_key(n) for n in listed("passthrough")}
+    path_exclude = GATE_PATH_EXCLUDE + tuple(listed("path_exclude"))
+    env = {}
+    for key, value in source.items():
+        name = _env_key(key)
+        if name in _GATE_DROP:
+            continue
+        if name in _GATE_NAMES or name.startswith(_GATE_PREFIXES) or name in extra:
+            env[key] = value
+    for key in [k for k in env if _env_key(k) == "PATH"]:
+        kept = [p for p in env[key].split(os.pathsep)
+                if p and not path_match(p.rstrip("/\\") + "/", path_exclude)]
+        env[key] = os.pathsep.join(kept)
+    return env
+
+
 def path_match(path, patterns):
     path = path.replace("\\", "/")
     for pat in patterns:
@@ -130,7 +194,7 @@ def executable(name):
     return f"{name}.cmd" if IS_WIN and name in ("npm", "pnpm", "yarn", "mvn") else name
 
 
-def ensure_node_modules(worktree, log, gate=None):
+def ensure_node_modules(worktree, log, gate=None, env=None):
     worktree = Path(worktree)
     dst = worktree / "node_modules"
     if dst.is_symlink():
@@ -146,7 +210,7 @@ def ensure_node_modules(worktree, log, gate=None):
         except (ValueError, OSError):
             pass
     pm, args = package_manager(worktree, gate)
-    if run_logged([executable(pm)] + args, worktree, os.environ.copy(), log) != 0:
+    if run_logged([executable(pm)] + args, worktree, gate_env() if env is None else env, log) != 0:
         raise WtError(f"{pm} 安装依赖失败，见 {log}")
     atomic_json(marker, {"digest": digest})
     _tm_exclude([dst])
@@ -160,12 +224,13 @@ def run_gate(cfg: WtConfig, alias, worktree, changed, log, clean=False):
     worktree = Path(worktree)
     if kind == "none":
         return True, "该仓库无构建门禁"
+    env = gate_env(cfg)
     if kind == "command":
         argv = gate.get("argv")
         if not isinstance(argv, list) or not argv:
             raise WtError(f"{alias}.gate.argv 必须是非空列表")
         with semaphore(cfg, "build-cmd", cfg.quota_builds):
-            rc = run_logged([str(a) for a in argv], worktree, os.environ.copy(), log)
+            rc = run_logged([str(a) for a in argv], worktree, env, log)
         return rc == 0, "门禁命令通过" if rc == 0 else f"门禁命令失败（exit {rc}）"
     if kind == "maven-modules":
         precheck = gate.get("precheck")
@@ -174,12 +239,11 @@ def run_gate(cfg: WtConfig, alias, worktree, changed, log, clean=False):
             script = worktree / precheck
             if not script.is_file():
                 return False, f"缺少预检脚本 {precheck}"
-            if run_logged(["bash", str(script)], worktree, os.environ.copy(), log) != 0:
+            if run_logged(["bash", str(script)], worktree, dict(env), log) != 0:
                 return False, f"预检失败：{precheck}"
         full, mods = maven_modules(worktree, changed)
         if not full and not mods:
             return True, "改动不涉及 Maven 模块（脚本/SQL/文档），无需编译"
-        env = os.environ.copy()
         jh = java_home_for(gate)
         java = str(Path(jh) / "bin" / ("java.exe" if IS_WIN else "java")) if jh else shutil.which("java")
         if not java:
@@ -209,9 +273,9 @@ def run_gate(cfg: WtConfig, alias, worktree, changed, log, clean=False):
     if kind == "npm-build":
         if not [p for p in changed if not p.endswith(".md")]:
             return True, "只改了文档，无需构建"
-        note = ensure_node_modules(worktree, log, gate)
+        note = ensure_node_modules(worktree, log, gate, env=dict(env))
         pm, _ = package_manager(worktree, gate)
         with semaphore(cfg, "build-maven", cfg.quota_builds):
-            rc = run_logged([executable(pm), "run", str(gate.get("script") or "build")], worktree, os.environ.copy(), log)
+            rc = run_logged([executable(pm), "run", str(gate.get("script") or "build")], worktree, env, log)
         return rc == 0, f"前端构建通过（{note}）" if rc == 0 else f"前端构建失败（{note}）"
     raise WtError(f"未知门禁类型 {kind}")

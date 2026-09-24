@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import actor, bind, gates, gitops as git, model, publish_pending, registry
+from . import actor, bind, gates, gitops as git, migrations, model, publish_pending, registry
 from . import names
 from .config import WtConfig, WtError
 from ..action_context import ActionContext, ActionContextError
@@ -403,6 +403,18 @@ def scope_conflicts(cfg: WtConfig, reg: Registry, repos, scope):
     return out
 
 
+def forbid_mixed_repos(cfg: WtConfig, repos):
+    if cfg.profile_name == "xinhua" and len(repos) > 1 and set(repos) & {"be", "web"}:
+        raise WtError("新华前端 web 与后端 be 必须拆成独立任务，分别提交、门禁、落地和发布")
+
+
+def same_work_in_repo(reg: Registry, task, alias):
+    """进行中、挂着 alias、标题/短语与本任务相似的其他任务：往本任务补挂 alias 前应先认领它们。"""
+    live = [t for t in reg.all(include_hub=False)
+            if t.get("state") in LIVE_STATES and t["id"] != task["id"] and alias in (t.get("repos") or {})]
+    return model.duplicate_candidates(live, task["title"], task.get("slug") or "")
+
+
 def create_task(cfg: WtConfig, reg: Registry, *, slug, title, repos, goal="", accept="", base=None, scope=None,
                 from_refs=None, source_branches=None, new_anyway="", tool=None, sessions=None, draft=False,
                 extra=None):
@@ -416,8 +428,7 @@ def create_task(cfg: WtConfig, reg: Registry, *, slug, title, repos, goal="", ac
     repos = [a.strip() for a in repos if a and a.strip()]
     if not repos or len(repos) != len(set(repos)):
         raise WtError("仓库列表不能为空或重复")
-    if cfg.profile_name == "xinhua" and len(repos) > 1 and set(repos) & {"be", "web"}:
-        raise WtError("新华前端 web 与后端 be 必须拆成独立任务，分别提交、门禁、落地和发布")
+    forbid_mixed_repos(cfg, repos)
     for alias in repos:
         rc = cfg.repo(alias)
         if rc.workspace_mode == "direct":
@@ -637,6 +648,21 @@ def cmd_add_repo(cfg, reg, args):
     rc = cfg.repo(alias)
     if rc.workspace_mode == "direct":
         raise WtError(f"{alias} 配置为 direct，不能补挂到 worktree 任务；请创建独立 direct 任务")
+    # 补挂等于新开一份 worktree，准入要和 new 一样：拆分规则、同一件事查重、范围重叠、槽位配额。
+    # 2026-09-24 T028（后端任务）补挂前端做完了同一功能，而专门的前端任务 T030 还挂着，
+    # 前端物理槽位也因此超出上限——此前这条命令一项都不查。
+    forbid_mixed_repos(cfg, list(task["repos"]) + [alias])
+    new_anyway = (getattr(args, "new_anyway", "") or "").strip()
+    if not new_anyway:
+        dups = same_work_in_repo(reg, task, alias)
+        if dups:
+            lines = [f"{t['id']} {t['title']}（{t['state']}，相似度 {s}）" for s, _c, t in dups[:5]]
+            raise WtError(f"{alias} 上已有疑似同一件事的任务，请认领它续做：\n  " + "\n  ".join(lines)
+                          + "\n确需补挂：加 --new-anyway \"理由\"")
+        conflicts = scope_conflicts(cfg, reg, [alias], task.get("scope") or [])
+        if conflicts:
+            raise WtError(f"{task['id']} 声明的范围与 {alias} 上进行中的任务重叠，落地时会冲突：\n  "
+                          + "\n  ".join(conflicts[:8]) + "\n先协调，确需补挂：加 --new-anyway \"理由\"")
     repo = rc.path
     if not repo.exists():
         raise WtError(f"本机没有仓库 {alias}：{repo}")
@@ -649,6 +675,9 @@ def cmd_add_repo(cfg, reg, args):
         raise WtError(f"{alias} 找不到基线 {upstream}")
     path = Path(task["dir"]) / alias
     admin = f"{names.TASK_ADMIN_PREFIX}{task['id']}-{alias}"
+    with reg.lock():
+        # 本任务已计入进行中任务数；这里只多占一个活跃槽位和一个物理槽位
+        check_quota(cfg, reg, exclude=task["id"], repos=[alias], materialize=[alias])
     git.worktree_add_unique(repo, path, admin, start_sha, branch=branch,
                             reason=f"{names.CLI} {task['id']} os={cfg.os}")
     try:
@@ -1182,19 +1211,36 @@ def select_repos(cfg: WtConfig, task, spec):
     return [a for a in ordered if a in wanted]
 
 
+def task_upstream(cfg: WtConfig, reg: Registry, task, alias):
+    """任务提交要落到的引用：叠放在进行中的父任务上时是父任务分支，否则是集成分支。"""
+    if task.get("base_task"):
+        parent = reg.load(task["base_task"], must=False)
+        if parent and parent["state"] in LIVE_STATES and alias in (parent.get("repos") or {}):
+            return parent["repos"][alias]["branch"]
+    return base_ref(cfg)
+
+
+def task_upstream_ref(cfg: WtConfig, reg: Registry, task, alias):
+    """task_upstream 在本仓库解析不到时退回登记的基线提交。"""
+    upstream = task_upstream(cfg, reg, task, alias)
+    if git.sha(Path(task["repos"][alias]["path"]), upstream):
+        return upstream
+    return task["repos"][alias].get("base_sha") or upstream
+
+
 def repo_ready_problems(cfg: WtConfig, reg: Registry, task, alias, check):
-    """单个仓库能否交付，返回 (问题, 新提交数)。问题只属于这个仓库，不连累任务里的其他仓库。"""
+    """单个仓库能否交付，返回 (问题, 新提交数)。问题只属于这个仓库，不连累任务里的其他仓库。
+
+    「本任务的提交」每次按 git 现状算：任务分支上还不在上游里的提交。不用登记的 base_sha——
+    AI 直接 git rebase 到新集成分支后它就过期了，`base_sha..HEAD` 会把集成分支上别人的提交
+    （dev 同步带进来的同事提交）一起算进来，ready 被别人不合规的提交说明拦下（2026-09-24 T028）。"""
     r = task["repos"][alias]
     path = Path(r["path"])
     problems = []
     if git.dirty(path):
         problems.append("工作区有未提交改动")
     head = git.sha(path, "HEAD")
-    upstream = r.get("base_sha") or base_ref(cfg)
-    if task.get("base_task"):
-        parent = reg.load(task["base_task"], must=False)
-        if parent and parent["state"] in LIVE_STATES:
-            upstream = parent["repos"][alias]["branch"]
+    upstream = task_upstream_ref(cfg, reg, task, alias)
     count = int(git.out(["rev-list", "--count", f"{upstream}..HEAD"], cwd=path))
     if cfg.repo(alias).gate.get("kind", "none") != "none" and count:
         c = check.get(alias)
@@ -1204,6 +1250,9 @@ def repo_ready_problems(cfg: WtConfig, reg: Registry, task, alias, check):
         err = model.check_message(cfg, body)
         if err:
             problems.append(f"提交 {h[:9]} {err}")
+    fork = git.merge_base(path, upstream, "HEAD")
+    if count and fork:
+        problems.extend(migrations.violations(cfg, alias, path, upstream, fork, "HEAD"))
     return problems, count
 
 
@@ -1238,7 +1287,12 @@ def cmd_ready(cfg, reg, args):
         if task_problems or not passed:
             raise WtError("ready 未通过，修正后重试")
         for alias in passed:
-            task["repos"][alias]["ready_sha"] = git.sha(Path(task["repos"][alias]["path"]), "HEAD")
+            path = Path(task["repos"][alias]["path"])
+            task["repos"][alias]["ready_sha"] = git.sha(path, "HEAD")
+            # 直接 git rebase 过的任务，登记的基线也跟上 git 现状（等同 restack 的登记）
+            fork = git.merge_base(path, task_upstream_ref(cfg, reg, task, alias), "HEAD") if results[alias][1] else None
+            if fork:
+                task["repos"][alias]["base_sha"] = fork
         if cfg.os == "windows":  # pragma: no cover - 仅 Windows
             publish_to_hub(cfg, task, args=args, tool=tool, sessions=sessions)
         reg.set_state(task, "ready", note="ready：" + "、".join(passed) + (f"；未过：{'、'.join(failed)}" if failed else ""))

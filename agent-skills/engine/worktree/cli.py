@@ -106,6 +106,7 @@ def build_parser():
     cmd("heartbeat", tasks.cmd_heartbeat, "续心跳", task=True, tool=True)
     p = cmd("add-repo", tasks.cmd_add_repo, "给进行中的任务补挂一个仓库（开工后才发现要跨仓改动）", task=True, tool=True)
     p.add_argument("alias", help="档案 worktrees.repos 里的仓库别名")
+    p.add_argument("--new-anyway", default="", help="该仓库上已有相似或范围重叠的任务但确需补挂时写理由")
     p = cmd("note", tasks.cmd_note, "记进度", task=True, tool=True)
     p.add_argument("text", nargs="*")
     p.add_argument("--done")

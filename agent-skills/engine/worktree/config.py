@@ -31,6 +31,8 @@ DEFAULT_MESSAGE_PATTERN = r"^[a-z]+(?:\([^)]+\))?: \S"
 DEFAULT_RULE_FILES = ["~/.claude/CLAUDE.md", "~/.codex/AGENTS.md", "~/.gemini/GEMINI.md",
                       "~/.workbuddy/MEMORY.md", "~/.workbuddy-ai/MEMORY.md"]
 DEFAULT_HANDOFF_SECTIONS = ["改了什么", "验证到哪一步", "未验证的风险", "数据库变更", "配置变更", "需要在共享环境验证的点"]
+# Flyway 版本化迁移的文件名：V<版本>__<描述>，版本可用 . 或 _ 分段
+DEFAULT_MIGRATION_VERSION = r"^V(\d+(?:[._]\d+)*)__"
 
 
 class WtError(Exception):
@@ -59,6 +61,51 @@ class RepoCfg:
     workspace_mode: str = "task-worktree"
     limits: dict = field(default_factory=dict)
     automatic: dict = field(default_factory=dict)
+    # 有序迁移的落地检查（见 migrations.py）；空 = 不检查
+    migrations: dict = field(default_factory=dict)
+
+
+def _migration_policy(value, where):
+    policy = _as_map(value, where)
+    if not policy:
+        return {}
+    unknown = set(policy) - {"paths", "version", "group", "timestamp_format", "max_future_minutes"}
+    if unknown:
+        raise WtError(f"{where} 有未知字段：{', '.join(sorted(unknown))}")
+    paths = _as_list(policy.get("paths"), f"{where}.paths")
+    if not paths:
+        raise WtError(f"{where}.paths 至少声明一个迁移目录")
+    version = str(policy.get("version") or DEFAULT_MIGRATION_VERSION)
+    try:
+        if re.compile(version).groups < 1:
+            raise WtError(f"{where}.version 必须用第 1 个分组取出版本号")
+    except re.error as e:
+        raise WtError(f"{where}.version 正则无效：{e}") from e
+    group = str(policy.get("group") or "directory")
+    if group not in ("directory", "repo"):
+        raise WtError(f"{where}.group 只支持 directory / repo")
+    fmt = policy.get("timestamp_format")
+    if fmt is not None and (not isinstance(fmt, str) or "%" not in fmt):
+        raise WtError(f"{where}.timestamp_format 应为 strftime 格式，如 %Y%m%d%H%M%S")
+    try:
+        future = int(policy.get("max_future_minutes", 10))
+    except (TypeError, ValueError) as e:
+        raise WtError(f"{where}.max_future_minutes 必须为非负整数") from e
+    if future < 0:
+        raise WtError(f"{where}.max_future_minutes 必须为非负整数")
+    return {"paths": paths, "version": version, "group": group, "timestamp_format": fmt,
+            "max_future_minutes": future}
+
+
+def _gate_env_policy(value):
+    policy = _as_map(value, "worktrees.gate_env")
+    unknown = set(policy) - {"passthrough", "path_exclude"}
+    if unknown:
+        raise WtError(f"worktrees.gate_env 有未知字段：{', '.join(sorted(unknown))}")
+    for name in _as_list(policy.get("passthrough"), "worktrees.gate_env.passthrough"):
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_()]*", name):
+            raise WtError(f"worktrees.gate_env.passthrough 的 {name} 不是合法的环境变量名")
+    _as_list(policy.get("path_exclude"), "worktrees.gate_env.path_exclude")
 
 
 @dataclass
@@ -366,6 +413,7 @@ def build_config(prof, os_name=None):
             audited=_as_list(rd.get("audited"), f"{where}.audited"),
             integration_path=expand(profile_repos[integration_key]) if integration_key else None,
             workspace_mode=workspace_mode, limits=limits, automatic=dict(automatic),
+            migrations=_migration_policy(rd.get("migrations"), f"{where}.migrations"),
         )
         both = set(repos[alias].anchors) & set(repos[alias].audited)
         if both:
@@ -397,6 +445,7 @@ def build_config(prof, os_name=None):
             re.compile(pattern)
         except re.error as e:
             raise WtError(f"worktrees.forbidden_commands 的正则 {pattern!r} 无效：{e}") from e
+    _gate_env_policy(wt.get("gate_env"))
     sections = _as_list(wt.get("handoff_sections"), "worktrees.handoff_sections") or list(DEFAULT_HANDOFF_SECTIONS)
     # 阶段 2 档案使用扁平键；迁移期同时读取新 legacy 映射。
     legacy_root = legacy.get("root", wt.get("legacy_root"))

@@ -40,6 +40,13 @@ worktrees:
     scripts/bootstrap\.sh: 任务目录里不要运行初始化脚本，任务引擎已完成等价准备
   task_rules:
     - 本地服务只用任务分配的端口，不连接共享环境
+  # 门禁只继承白名单环境变量（PATH、HOME、LANG、代理、JDK/Maven/npm 相关等），不继承调用方工具注入的
+  # NODE_OPTIONS、BASH_ENV、PYTHONPATH；构建确实依赖的其他变量在这里追加，不要放凭据。
+  # gate_env:
+  #   passthrough:
+  #     - EXTRA_BUILD_FLAG
+  #   path_exclude:
+  #     - "*/some-tool/shims*"
   handoff_sections:
     - 修改内容
     - 验证结果
@@ -60,6 +67,12 @@ worktrees:
         argv:
           - make
           - check
+      # 按版本号顺序执行的迁移（如 Flyway）：ready 与 land 要求新增迁移的版本号大于集成分支上同组已有的最大版本。
+      # migrations:
+      #   paths:
+      #     - "db/migrations/**"
+      #   group: directory                 # 每个目录各自排序（一库一张历史表）；全仓统一排序写 repo
+      #   timestamp_format: "%Y%m%d%H%M%S"  # 版本号是时间戳时写上：拒绝未来时间，并给出保持顺序的改名命令
     frontend:
       profile_repo: frontend
       trunk: main

@@ -14,7 +14,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import actor, gates, gitops as git, model, names, registry, tasks
+from . import actor, gates, gitops as git, migrations, model, names, registry, tasks
 from ..action_context import ActionContext
 from .config import WtConfig, WtError
 from .registry import LIVE_STATES, Registry, file_lock, now_iso, say, stamp
@@ -431,7 +431,9 @@ def gate_prepare(cfg: WtConfig, alias, cand):
     if cfg.os == "windows" and cfg.windows_integration:
         fetch_task_refs(cfg, alias, gate)
     git.run(["checkout", "--detach", cand], cwd=gate)
-    git.run(["clean", "-fdq", "-e", "node_modules"], cwd=gate)
+    # -x 连被忽略的构建产物（dist、target）一起清掉，只留依赖缓存：共享门禁区上一次落地留下的
+    # 几千个 dist 文件会让构建工具先做一次批量删除，门禁结果就取决于上一个任务留下了什么。
+    git.run(["clean", "-fdxq", "-e", "node_modules"], cwd=gate)
     return gate
 
 
@@ -491,8 +493,12 @@ def plan_landing(cfg: WtConfig, reg: Registry, task, alias, from_hub):
     clean, tree, conflicts = git.merge_tree(repo, head, tip)
     if not clean:
         raise Reject(f"与 {cfg.integration} 冲突 {len(conflicts)} 个文件：{'、'.join(conflicts[:15])}。"
-                     f"请在任务里 git rebase {cfg.integration} 解决后重新 check/ready")
+                     f"请运行 {names.CLI} restack {task['id']}，在任务里逐块解决冲突后重新 check/ready")
     cand = git.commit_tree(repo, tree, [head, tip], landing_message(cfg, task))
+    # 在落地锁里对照「此刻」的集成分支检查：ready 之后别的任务可能又落了更高版本的迁移。
+    order = migrations.violations(cfg, alias, repo, head, head, cand, label=cfg.integration)
+    if order:
+        raise Reject("迁移版本顺序不对：" + "；".join(order))
     changed = git.diff_names(repo, head, cand)
     return {"status": "candidate", "head": head, "tip": tip, "cand": cand, "changed": changed,
             "sensitive": [p for p in changed if gates.path_match(p, cfg.sensitive_paths)]}
