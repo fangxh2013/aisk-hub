@@ -161,7 +161,11 @@ def main():
         print(json.dumps({"decision": "ask"}))
         return
     args = call.get("args") or {}
-    cmd = (args.get("command") or args.get("cmd") or "").strip()
+    # Antigravity run_command 参数键名为 CommandLine（大写 C L）；
+    # guards.py normalize() 已记录这一事实（args.get("CommandLine") or ...）。
+    # 旧模板只查 "command"/"cmd"，导致 DENY/ALLOW 规则对 Antigravity 完全失效。
+    cmd = (args.get("CommandLine") or args.get("commandLine")
+           or args.get("command") or args.get("cmd") or "").strip()
 
     for pat in DENY:
         if cmd.startswith(pat):
@@ -180,20 +184,67 @@ if __name__ == "__main__":
 '''
 
 
+def _merge_antigravity_outside_task_hook(hooks_json, tool, python_cmd, dry_run=False):
+    """把任务外高风险确认（aisk task guard）并入 Antigravity PreToolUse 数组。
+
+    Antigravity hooks.json 格式为 {PreToolUse: [{matcher, hooks}]}，与
+    Claude/Codex 的 {hooks: {PreToolUse: [...]}} 不同，不能复用
+    _merge_outside_task_guard_hook；这里追加一个 matcher:".*" 条目。
+
+    2026-09-28：guards.py OUTSIDE_CONFIRM_TOOLS 已包含 "antigravity"（第 111 行），
+    confirm_outside_high_risk() 也有 antigravity 分支（第 1561/1590 行），
+    但 apply_antigravity 从未装这个 hook——任务目录外 git push dev 对 Antigravity
+    完全透明，CI/CD 分支保护是唯一屏障。
+    """
+    data = {}
+    if hooks_json.is_file():
+        try:
+            data = json.loads(hooks_json.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            return None, f"hooks.json 不是合法 JSON，跳过（{e}）"
+    pre = data.get("PreToolUse")
+    if not isinstance(pre, list):
+        return None, "hooks.PreToolUse 不是数组，跳过"
+    cli = _workbuddy_cli_path()                   # aisk CLI 路径
+    command = f'"{cli}" task guard --tool {tool}'
+    for group in pre:
+        if not isinstance(group, dict):
+            continue
+        for item in group.get("hooks") or []:
+            if isinstance(item, dict) and item.get("command") == command:
+                return 0, "任务外高风险确认钩子已是最新"
+    entry = {
+        "matcher": ".*",
+        "hooks": [{"type": "command", "timeout": 660,
+                   "statusMessage": "确认任务外高风险动作", "command": command}],
+    }
+    if dry_run:
+        return 1, "将新增任务外高风险确认钩子"
+    pre.append(entry)
+    hooks_json.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                          encoding="utf-8")
+    return 1, "任务外高风险确认钩子已并入"
+
+
 def apply_antigravity(plugin_dir=None, dry_run=False):
     root = Path(plugin_dir) if plugin_dir else \
         Path.home() / ".gemini" / "config" / "plugins" / "agent-skills"
     hooks_json = root / "hooks.json"
     guard = root / "scripts" / "aisk_guard.py"
 
-    # 前缀形式：去掉尾部通配，改成 startswith 判定
-    allow = sorted({v.replace(" *", "").strip() for v in READONLY_VERBS})
-    deny = sorted({v.replace(" *", "").strip() for v in DENY_VERBS})
+    # 前缀形式：去掉尾部通配（" *" 或裸 "*"），改成 startswith 判定。
+    # 注意：DENY_VERBS 里部分条目是 "git push origin main*"（无空格前缀的 *），
+    # 仅 replace(" *", "") 无法去掉这类尾部 *，导致 startswith 永远不匹配。
+    # 正确做法：先 replace(" *", "") 再 rstrip("*")。
+    allow = sorted({v.replace(" *", "").rstrip("*").strip() for v in READONLY_VERBS})
+    deny = sorted({v.replace(" *", "").rstrip("*").strip() for v in DENY_VERBS})
 
     if dry_run:
-        return PermissionResult("antigravity", "ok",
-                                "将生成 hooks.json + 守卫脚本", hooks_json,
-                                len(allow) + len(deny))
+        hook_n, hook_msg = _merge_antigravity_outside_task_hook(hooks_json, "antigravity",
+                                                                 "", dry_run=True)
+        detail = f"将生成 hooks.json + 守卫脚本；{hook_msg}"
+        return PermissionResult("antigravity", "ok", detail, hooks_json,
+                                len(allow) + len(deny) + (hook_n or 0))
 
     guard.parent.mkdir(parents=True, exist_ok=True)
     guard.write_text(ANTIGRAVITY_GUARD % {"allow": json.dumps(allow, ensure_ascii=False),
@@ -220,8 +271,12 @@ def apply_antigravity(plugin_dir=None, dry_run=False):
     _backup(hooks_json)
     hooks_json.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
                           encoding="utf-8")
-    return PermissionResult("antigravity", "ok", "PreToolUse 守卫已生成",
-                            hooks_json, len(allow) + len(deny))
+
+    # 追加任务外高风险确认钩子（git push/merge 受保护分支），与 claude/workbuddy 对齐。
+    hook_n, hook_msg = _merge_antigravity_outside_task_hook(hooks_json, "antigravity", python_cmd)
+    return PermissionResult("antigravity", "ok",
+                            f"PreToolUse 守卫已生成；{hook_msg}",
+                            hooks_json, len(allow) + len(deny) + (hook_n or 0))
 
 
 def apply_codex(dry_run=False):
