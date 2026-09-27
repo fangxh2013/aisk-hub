@@ -1974,6 +1974,24 @@ class WorkspaceRootResolution(unittest.TestCase):
         self.assertEqual(prof["project"], "shop")
         self.assertIn("workspace_root", why)
 
+    def test_paths_are_shown_the_way_the_profile_and_the_user_wrote_them(self):
+        """Windows 的 Y: 映射盘规范化后是 UNC 路径，人认不出、cmd 也 cd 不进去：判定用规范化路径，显示保持原样。
+        软链接目录是同一件事在 POSIX 上的等价物。"""
+        link = self.root / "link"
+        os.symlink(self.work, link)
+        self.write_profile("shop", {"backend": link / "shop-api", "frontend": link / "shop-web"})
+        prof, why = profile_mod.resolve(start=link)
+        self.assertEqual(prof["project"], "shop", "判定不受影响：软链接和真实目录是同一个目录")
+        self.assertIn(str(link), why)
+        self.assertNotIn(str(self.work), why, "来源里要写用户输入的形式")
+        lines = aisk_cli._repo_layout_lines(profile_mod.load(self.pdir / "shop.yaml"))
+        self.assertEqual(lines[0], f"工作根目录: {link}（下面的仓库路径相对它显示）")
+        self.assertRegex("\n".join(lines), r"(?m)^  backend\s+shop-api$")
+        self.write_profile("tooling", {"main": link / "shop-docs"})
+        with self.assertRaises(profile_mod.ProfileError) as ctx:
+            profile_mod.resolve(start=link)
+        self.assertIn(f"workspace_root: {link}", str(ctx.exception), "报错里让人照抄的那一行也用原样路径")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -112,8 +112,12 @@ def resolve_linked_repo(root):
     return root
 
 
-def repo_entries(prof):
-    """档案 repos 里的 (角色名, 绝对路径)，按声明顺序。路径含未展开变量或不是绝对路径的条目跳过。"""
+def repo_entries(prof, resolve=True):
+    """档案 repos 里的 (角色名, 绝对路径)，按声明顺序。路径含未展开变量或不是绝对路径的条目跳过。
+
+    判定用 resolve=True（规范化后才能可靠比较）；给人看的输出用 resolve=False，保留档案里写的形式：
+    Windows 的映射盘（如 Y:）规范化后会变成 //主机/共享 形式的 UNC 路径，人认不出是自己敲的那个目录，
+    cmd 也 cd 不进去。"""
     out = []
     repos = prof.get("repos") or {}
     if isinstance(repos, dict):
@@ -124,7 +128,7 @@ def repo_entries(prof):
                     continue
                 p = Path(expanded).expanduser()
                 if p.is_absolute():
-                    out.append((str(role), p.resolve()))
+                    out.append((str(role), p.resolve() if resolve else p))
     return out
 
 
@@ -132,7 +136,7 @@ def _repo_paths(prof):
     return [path for _role, path in repo_entries(prof)]
 
 
-def workspace_root(prof):
+def workspace_root(prof, resolve=True):
     """档案里声明的工作根目录（workspace_root）；没声明、或含未展开变量时返回 None。"""
     value = prof.get("workspace_root")
     if not isinstance(value, str) or not value.strip():
@@ -141,16 +145,18 @@ def workspace_root(prof):
     if "$" in expanded:
         return None
     p = Path(expanded).expanduser()
-    return p.resolve() if p.is_absolute() else None
+    if not p.is_absolute():
+        return None
+    return p.resolve() if resolve else p
 
 
-def workspace_of(prof):
+def workspace_of(prof, resolve=True):
     """这个档案的工作根目录：声明的优先；没声明时取并排放着最多仓库的那个上级目录（至少两个仓库才算）。"""
-    declared = workspace_root(prof)
+    declared = workspace_root(prof, resolve)
     if declared is not None:
         return declared
     counts = {}
-    for _role, path in repo_entries(prof):
+    for _role, path in repo_entries(prof, resolve):
         counts[path.parent] = counts.get(path.parent, 0) + 1
     if not counts:
         return None
@@ -166,9 +172,9 @@ def _dir_hints(profiles):
             prof = load(p)
         except Exception:                    # noqa: BLE001  坏档案不该拖垮提示
             continue
-        where = workspace_of(prof)
+        where = workspace_of(prof, resolve=False)
         if where is None:
-            entries = repo_entries(prof)
+            entries = repo_entries(prof, resolve=False)
             where = entries[0][1] if entries else None
         if where is not None:
             out.append(f"{p.stem} → {where}")
@@ -181,7 +187,8 @@ def _match_workspace(profiles, start):
     两种登记方式：档案写了 workspace_root（该目录，以及它下面不属于任何仓库的子目录），
     或者当前目录恰好是 repos 里某个仓库的直接上级目录。声明的优先于推断的；
     同一优先级有多个档案认领，一律拒绝猜测。"""
-    cwd = Path(start or Path.cwd()).resolve()
+    cwd = Path(start or Path.cwd()).resolve()      # 判定用规范化路径
+    shown = Path(start or Path.cwd()).absolute()   # 给人看的保持原样（映射盘不变成 UNC，见 repo_entries）
     declared, implicit = [], []
     for p in profiles:
         try:
@@ -200,21 +207,22 @@ def _match_workspace(profiles, start):
         top = [d for d in declared if len(d[2].parts) == deepest]
         if len(top) > 1:
             raise ProfileError(
-                f"当前目录 {cwd} 同时在多个档案声明的 workspace_root 里（{'、'.join(d[0].stem for d in top)}），"
+                f"当前目录 {shown} 同时在多个档案声明的 workspace_root 里（{'、'.join(d[0].stem for d in top)}），"
                 f"拒绝猜测。请用 --profile 显式指定。"
             )
         p, prof, ws = top[0]
         if cwd == ws:
-            return prof, f"当前目录 {cwd} 是 {p.stem} 声明的工作根目录（workspace_root）"
-        return prof, f"当前目录 {cwd} 在 {p.stem} 声明的工作根目录 {ws} 之下（workspace_root）"
+            return prof, f"当前目录 {shown} 是 {p.stem} 声明的工作根目录（workspace_root）"
+        return prof, (f"当前目录 {shown} 在 {p.stem} 声明的工作根目录 "
+                      f"{workspace_root(prof, resolve=False)} 之下（workspace_root）")
     if len(implicit) == 1:
         p, prof, under = implicit[0]
-        return prof, f"当前目录 {cwd} 是 {p.stem} 的仓库上级目录（repos 里的 {'、'.join(under)} 直接在它下面）"
+        return prof, f"当前目录 {shown} 是 {p.stem} 的仓库上级目录（repos 里的 {'、'.join(under)} 直接在它下面）"
     if len(implicit) > 1:
         detail = "\n".join(f"  {p.stem}：{'、'.join(under)}" for p, _prof, under in implicit)
         raise ProfileError(
-            f"当前目录 {cwd} 是多个档案的仓库共同的上级目录：\n{detail}\n"
-            f"拒绝猜测。想让其中一个作为这里的默认档案，就在它的档案里加一行 workspace_root: {cwd}；"
+            f"当前目录 {shown} 是多个档案的仓库共同的上级目录：\n{detail}\n"
+            f"拒绝猜测。想让其中一个作为这里的默认档案，就在它的档案里加一行 workspace_root: {shown}；"
             f"或者用 --profile <名字> 显式指定。"
         )
     return None

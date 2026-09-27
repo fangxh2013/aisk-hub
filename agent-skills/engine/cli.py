@@ -33,10 +33,10 @@ def _resolve(args):
 
 def _repo_layout_lines(prof):
     """档案登记的目录结构：工作根目录，以及各仓库（前端、后端、文档、部署…）相对它的位置。"""
-    entries = profile.repo_entries(prof)
+    entries = profile.repo_entries(prof, resolve=False)   # 保持档案里写的形式，映射盘不显示成 UNC
     if not entries:
         return []
-    ws = profile.workspace_of(prof)
+    ws = profile.workspace_of(prof, resolve=False)
     width = max(len(role) for role, _path in entries)
     lines = [f"工作根目录: {ws}（下面的仓库路径相对它显示）"] if ws else []
     lines.append("仓库:")
