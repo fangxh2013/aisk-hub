@@ -31,6 +31,24 @@ def _resolve(args):
     return prof, why
 
 
+def _repo_layout_lines(prof):
+    """档案登记的目录结构：工作根目录，以及各仓库（前端、后端、文档、部署…）相对它的位置。"""
+    entries = profile.repo_entries(prof)
+    if not entries:
+        return []
+    ws = profile.workspace_of(prof)
+    width = max(len(role) for role, _path in entries)
+    lines = [f"工作根目录: {ws}（下面的仓库路径相对它显示）"] if ws else []
+    lines.append("仓库:")
+    for role, path in entries:
+        try:
+            shown = path.relative_to(ws) if ws else path
+        except ValueError:
+            shown = path
+        lines.append(f"  {role.ljust(width)}  {shown}")
+    return lines
+
+
 def cmd_profile(args):
     prof, why = _resolve(args)
     _out(f"profile: {prof['project']}")
@@ -38,6 +56,8 @@ def cmd_profile(args):
     _out(f"文件: {prof['_path']}")
     envs = prof.get("envs") or {}
     _out(f"环境: {', '.join(envs) if envs else '(无)'}")
+    for line in _repo_layout_lines(prof):
+        _out(line)
     return 0
 
 

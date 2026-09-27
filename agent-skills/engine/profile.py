@@ -6,6 +6,10 @@
 AI 记忆里至少两次记录过并发会话互踩状态的真实事故，不是理论风险。
 所以 profile 由「当前所在仓库」推导：从 cwd 向上找 git 根，再匹配各 profile 的 repos.*。
 匹配不到或匹配到多个，一律要求显式 --profile，绝不静默猜测。
+
+不在任何 git 仓库里时，还认「工作根目录」：档案里写了 `workspace_root` 的那个目录，或者恰好是
+档案 repos 里某个仓库的直接上级目录（前端、后端、文档、部署仓库并排放着的那一层）。
+只有一个档案认领才采用；几个档案共用同一层就拒绝猜测，并告诉人怎么登记。
 """
 
 import os
@@ -53,6 +57,12 @@ def load(path):
     data.setdefault("envs", {})
     if not isinstance(data["envs"], dict):
         raise ProfileError(f"{path}: envs 必须是映射")
+    declared = data.get("workspace_root")
+    if declared not in (None, ""):
+        expanded = os.path.expandvars(str(declared)) if isinstance(declared, str) else ""
+        # 含未展开的 $变量时和 repos 一样跳过，换一台没设该变量的机器不该让整个档案打不开
+        if "$" not in expanded and not (expanded and Path(expanded).expanduser().is_absolute()):
+            raise ProfileError(f"{path}: workspace_root 必须是绝对路径（可以用 ~），收到 {declared!r}")
     data["_path"] = path
     return data
 
@@ -102,19 +112,112 @@ def resolve_linked_repo(root):
     return root
 
 
-def _repo_paths(prof):
+def repo_entries(prof):
+    """档案 repos 里的 (角色名, 绝对路径)，按声明顺序。路径含未展开变量或不是绝对路径的条目跳过。"""
     out = []
     repos = prof.get("repos") or {}
     if isinstance(repos, dict):
-        for v in repos.values():
+        for role, v in repos.items():
             if isinstance(v, str):
                 expanded = os.path.expandvars(v)
                 if "$" in expanded:
                     continue
                 p = Path(expanded).expanduser()
                 if p.is_absolute():
-                    out.append(p.resolve())
+                    out.append((str(role), p.resolve()))
     return out
+
+
+def _repo_paths(prof):
+    return [path for _role, path in repo_entries(prof)]
+
+
+def workspace_root(prof):
+    """档案里声明的工作根目录（workspace_root）；没声明、或含未展开变量时返回 None。"""
+    value = prof.get("workspace_root")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    expanded = os.path.expandvars(value.strip())
+    if "$" in expanded:
+        return None
+    p = Path(expanded).expanduser()
+    return p.resolve() if p.is_absolute() else None
+
+
+def workspace_of(prof):
+    """这个档案的工作根目录：声明的优先；没声明时取并排放着最多仓库的那个上级目录（至少两个仓库才算）。"""
+    declared = workspace_root(prof)
+    if declared is not None:
+        return declared
+    counts = {}
+    for _role, path in repo_entries(prof):
+        counts[path.parent] = counts.get(path.parent, 0) + 1
+    if not counts:
+        return None
+    best, n = max(counts.items(), key=lambda kv: (kv[1], -len(kv[0].parts)))
+    return best if n >= 2 else None
+
+
+def _dir_hints(profiles):
+    """报错里告诉人各档案的目录在哪：cd 过去，或者用 --profile 指定。"""
+    out = []
+    for p in profiles:
+        try:
+            prof = load(p)
+        except Exception:                    # noqa: BLE001  坏档案不该拖垮提示
+            continue
+        where = workspace_of(prof)
+        if where is None:
+            entries = repo_entries(prof)
+            where = entries[0][1] if entries else None
+        if where is not None:
+            out.append(f"{p.stem} → {where}")
+    return "；".join(out)
+
+
+def _match_workspace(profiles, start):
+    """当前目录不在任何 git 仓库里：它是不是某个档案的工作根目录？返回 (prof, 说明) 或 None。
+
+    两种登记方式：档案写了 workspace_root（该目录，以及它下面不属于任何仓库的子目录），
+    或者当前目录恰好是 repos 里某个仓库的直接上级目录。声明的优先于推断的；
+    同一优先级有多个档案认领，一律拒绝猜测。"""
+    cwd = Path(start or Path.cwd()).resolve()
+    declared, implicit = [], []
+    for p in profiles:
+        try:
+            prof = load(p)
+        except Exception:                    # noqa: BLE001  坏档案不该拖垮别的档案的判定
+            continue
+        ws = workspace_root(prof)
+        if ws is not None and (cwd == ws or ws in cwd.parents):
+            declared.append((p, prof, ws))
+            continue
+        under = [role for role, path in repo_entries(prof) if path.parent == cwd]
+        if under:
+            implicit.append((p, prof, under))
+    if declared:
+        deepest = max(len(ws.parts) for _p, _prof, ws in declared)
+        top = [d for d in declared if len(d[2].parts) == deepest]
+        if len(top) > 1:
+            raise ProfileError(
+                f"当前目录 {cwd} 同时在多个档案声明的 workspace_root 里（{'、'.join(d[0].stem for d in top)}），"
+                f"拒绝猜测。请用 --profile 显式指定。"
+            )
+        p, prof, ws = top[0]
+        if cwd == ws:
+            return prof, f"当前目录 {cwd} 是 {p.stem} 声明的工作根目录（workspace_root）"
+        return prof, f"当前目录 {cwd} 在 {p.stem} 声明的工作根目录 {ws} 之下（workspace_root）"
+    if len(implicit) == 1:
+        p, prof, under = implicit[0]
+        return prof, f"当前目录 {cwd} 是 {p.stem} 的仓库上级目录（repos 里的 {'、'.join(under)} 直接在它下面）"
+    if len(implicit) > 1:
+        detail = "\n".join(f"  {p.stem}：{'、'.join(under)}" for p, _prof, under in implicit)
+        raise ProfileError(
+            f"当前目录 {cwd} 是多个档案的仓库共同的上级目录：\n{detail}\n"
+            f"拒绝猜测。想让其中一个作为这里的默认档案，就在它的档案里加一行 workspace_root: {cwd}；"
+            f"或者用 --profile <名字> 显式指定。"
+        )
+    return None
 
 
 def db_prefixes(prof):
@@ -249,11 +352,20 @@ def resolve(explicit=None, start=None, db_hint=None):
                 f"请用 --profile 显式指定。"
             )
 
+    # 不在任何 git 仓库里：当前目录可能是某个档案的工作根目录（并排放着各个仓库的那一层）。
+    # 放在库名兜底之后：库名是调用方主动给出的、更具体的信号。
     if root is None:
+        found = _match_workspace(profiles, start)
+        if found is not None:
+            return found
+
+    if root is None:
+        hints = _dir_hints(profiles)
         raise ProfileError(
             "当前目录不在任何 git 仓库内，无法自动判定 profile。\n"
             f"现有 profile：{avail}\n"
-            "请用 --profile <名字> 指定；走 MCP 时也可以直接给 database 参数，"
+            + (f"各档案的目录：{hints}\n" if hints else "")
+            + "请 cd 到其中一个目录，或用 --profile <名字> 指定；走 MCP 时也可以直接给 database 参数，"
             "会按库前缀反查。"
         )
     raise ProfileError(

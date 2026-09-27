@@ -1849,5 +1849,131 @@ class StuckFlowMessages(Sandbox):
         self.assertIn("可用于 aisk task 的档案：beta", str(ctx.exception))
 
 
+class WorkspaceRootResolution(unittest.TestCase):
+    """工作根目录（并排放着前端、后端、文档、部署仓库的上级目录，本身不是 git 仓库）也要能判出档案。
+
+    2026-09-27 Windows：在放着全部仓库的工作目录里运行 aisk，每次都报「当前目录不在任何 git 仓库内」，
+    可档案的 repos 里明明登记了每个仓库的位置——只是没人用它反推「我在哪个项目的工作目录」。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="wt-workspace-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.pdir = self.root / "profiles"
+        self.pdir.mkdir()
+        patcher = patch.object(profile_mod, "PROFILE_DIR", self.pdir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.work = self.root / "work"
+        for name in ("shop-api", "shop-web", "shop-docs", "shop-deploy"):
+            (self.work / name / ".git").mkdir(parents=True)
+
+    def write_profile(self, name, repos, extra=""):
+        lines = [f"project: {name}", "repos:"] + [f"  {role}: {path}" for role, path in repos.items()]
+        (self.pdir / f"{name}.yaml").write_text("\n".join(lines) + "\n" + extra, encoding="utf-8")
+
+    def shop_repos(self):
+        return {"backend": self.work / "shop-api", "frontend": self.work / "shop-web",
+                "docs": self.work / "shop-docs", "deploy": self.work / "shop-deploy"}
+
+    def test_parent_of_repos_resolves_when_only_one_profile_claims_it(self):
+        self.write_profile("shop", self.shop_repos())
+        self.write_profile("elsewhere", {"main": self.root / "other" / "tool"})
+        prof, why = profile_mod.resolve(start=self.work)
+        self.assertEqual(prof["project"], "shop")
+        self.assertIn("仓库上级目录", why)
+
+    def test_shared_parent_is_ambiguous_until_one_profile_declares_workspace_root(self):
+        self.write_profile("shop", self.shop_repos())
+        (self.work / "tool" / ".git").mkdir(parents=True)
+        self.write_profile("tooling", {"main": self.work / "tool"})
+        with self.assertRaises(profile_mod.ProfileError) as ctx:
+            profile_mod.resolve(start=self.work)
+        text = str(ctx.exception)
+        self.assertIn("拒绝猜测", text)
+        self.assertIn("shop", text)
+        self.assertIn("tooling", text)
+        self.assertIn(f"workspace_root: {self.work}", text, "要告诉人在档案里写什么")
+        self.write_profile("shop", self.shop_repos(), extra=f"workspace_root: {self.work}\n")
+        prof, why = profile_mod.resolve(start=self.work)
+        self.assertEqual(prof["project"], "shop")
+        self.assertIn("workspace_root", why)
+
+    def test_declared_root_covers_plain_subdirectories_but_not_unrelated_repos(self):
+        self.write_profile("shop", self.shop_repos(), extra=f"workspace_root: {self.work}\n")
+        notes = self.work / "notes"
+        notes.mkdir()
+        prof, _why = profile_mod.resolve(start=notes)
+        self.assertEqual(prof["project"], "shop")
+        stranger = self.work / "stranger"
+        (stranger / ".git").mkdir(parents=True)
+        with self.assertRaises(profile_mod.ProfileError) as ctx:
+            profile_mod.resolve(start=stranger)
+        self.assertIn("不属于任何 profile", str(ctx.exception), "工作根目录里的无关仓库不能被悄悄归给这个档案")
+
+    def test_two_profiles_declaring_the_same_root_are_ambiguous_but_deeper_root_wins(self):
+        self.write_profile("shop", self.shop_repos(), extra=f"workspace_root: {self.work}\n")
+        self.write_profile("shop2", {"main": self.work / "shop-api"}, extra=f"workspace_root: {self.work}\n")
+        with self.assertRaises(profile_mod.ProfileError) as ctx:
+            profile_mod.resolve(start=self.work)
+        self.assertIn("拒绝猜测", str(ctx.exception))
+        (self.work / "sub").mkdir()
+        self.write_profile("shop2", {"main": self.work / "shop-api"}, extra=f"workspace_root: {self.work / 'sub'}\n")
+        prof, _why = profile_mod.resolve(start=self.work / "sub")
+        self.assertEqual(prof["project"], "shop2", "更深的 workspace_root 更具体")
+
+    def test_existing_signals_keep_precedence(self):
+        self.write_profile("shop", self.shop_repos(), extra=f"workspace_root: {self.work}\n")
+        self.write_profile("other", {"main": self.root / "other" / "tool"},
+                           extra="envs:\n  dev:\n    db: {host: h, user: u, secret: s, prefix: acme_dev_}\n")
+        prof, why = profile_mod.resolve(start=self.work / "shop-api")
+        self.assertEqual((prof["project"], "shop-api" in why), ("shop", True), "在仓库里仍按仓库判定")
+        prof, why = profile_mod.resolve(start=self.work, db_hint="acme_dev_cloud")
+        self.assertEqual(prof["project"], "other", "调用方给出的库名比目录更具体")
+        self.assertIn("acme_dev_", why)
+
+    def test_no_match_error_says_where_each_profile_lives(self):
+        self.write_profile("shop", self.shop_repos())
+        self.write_profile("solo", {"main": self.root / "solo" / "repo"})
+        with self.assertRaises(profile_mod.ProfileError) as ctx:
+            profile_mod.resolve(start=self.root)
+        text = str(ctx.exception)
+        self.assertIn(f"shop → {self.work}", text)
+        self.assertIn("solo → ", text)
+        self.assertIn("--profile", text)
+
+    def test_bad_workspace_root_fails_at_load_not_silently(self):
+        for bad in ("relative/dir", "[1, 2]"):
+            with self.subTest(bad=bad):
+                self.write_profile("shop", self.shop_repos(), extra=f"workspace_root: {bad}\n")
+                with self.assertRaises(profile_mod.ProfileError) as ctx:
+                    profile_mod.load(self.pdir / "shop.yaml")
+                self.assertIn("workspace_root", str(ctx.exception))
+        self.write_profile("shop", self.shop_repos(), extra="workspace_root: $AISK_TEST_UNSET_VAR/work\n")
+        self.assertIsNone(profile_mod.workspace_root(profile_mod.load(self.pdir / "shop.yaml")))
+
+    def test_profile_command_prints_the_layout_from_the_work_directory(self):
+        self.write_profile("shop", self.shop_repos(), extra=f"workspace_root: {self.work}\n")
+        previous = Path.cwd()
+        os.chdir(self.work)
+        self.addCleanup(os.chdir, previous)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(aisk_cli.main(["profile"]), 0)
+        text = out.getvalue()
+        self.assertIn("profile: shop", text)
+        self.assertIn(f"工作根目录: {self.work}", text)
+        for role, folder in (("backend", "shop-api"), ("frontend", "shop-web"),
+                             ("docs", "shop-docs"), ("deploy", "shop-deploy")):
+            self.assertRegex(text, rf"(?m)^  {role}\s+{folder}$")
+
+    def test_task_commands_resolve_from_the_work_directory_too(self):
+        self.write_profile("shop", self.shop_repos(),
+                           extra=f"workspace_root: {self.work}\nworktrees:\n  data_root: {self.root / 'data'}\n")
+        prof, why = wt_config.resolve_profile(None, start=self.work)
+        self.assertEqual(prof["project"], "shop")
+        self.assertIn("workspace_root", why)
+
+
 if __name__ == "__main__":
     unittest.main()

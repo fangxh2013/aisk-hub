@@ -114,6 +114,11 @@ cp agent-skills/templates/profile.example.yaml "$AISKHUB_PROFILE_DIR/my-project.
 ./bin/aisk --profile my-project doctor
 ```
 
+在放着各个仓库的工作目录（本身不是 git 仓库）里运行时，只要有仓库直接在这个目录下且只有一个
+profile 认领，就自动选中它，`aisk profile` 会列出工作根目录和各仓库的位置。几个 profile 的
+仓库放在同一个目录里时，在想作为默认的那个 profile 里写 `workspace_root: <该目录>`；不登记就
+拒绝猜测，报错里会写明怎么登记。
+
 ### C. 授权用户再接入私有 Overlay
 
 `aisk-private` 是可选的、需要单独授权的业务覆盖层；没有权限的同事只使用 A 流程，不要把私有

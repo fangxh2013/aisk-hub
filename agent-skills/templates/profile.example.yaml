@@ -14,6 +14,11 @@ repos:
   # frontend: ~/work/你的前端仓库
   # deploy:   ~/work/你的部署仓库     # 声明了才能用 aisk fact service
 
+# 工作根目录：并排放着上面这些仓库的上级目录（它本身不是 git 仓库）。在这个目录里运行 aisk 时用本档案，
+# `aisk profile` 也会把各仓库相对它的位置列出来。可以不写：只要有仓库直接在当前目录下、且只有这一个
+# 档案认领，aisk 就自动选中它；几个档案的仓库放在同一个目录里时，在想作为默认的档案里写上这一行。
+# workspace_root: ~/work
+
 envs:
   dev:
     hosts: {app: "<app-ip-placeholder>"}
