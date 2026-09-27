@@ -282,14 +282,24 @@ def validate_adapter_contract(data):
     return f"{len(actors)} 个 actor；四工具安装目标、会话、标题和降级策略通过"
 
 
+def repo_state(root):
+    """验收开始时的提交号与工作树状态。
+
+    必须在写任何报告之前取一次：报告目录默认就在仓库里，边写边查会把本次运行自己刚写出的
+    报告算成「工作树有改动」，干净的检出也会被记成 worktree_dirty。
+    """
+    return {"git_commit": git(root, "rev-parse", "HEAD"), "worktree_dirty": bool(git(root, "status", "--porcelain"))}
+
+
 def make_report(report_id, report_type, checks, root, command="python3 tools/verify_spec.py", *,
-                validation_scope="offline_contract", real_file_checked=False):
+                validation_scope="offline_contract", real_file_checked=False, git_state=None):
+    state = git_state or repo_state(root)
     report = {
         "report_id": report_id,
         "report_type": report_type,
         "run_id": str(uuid.uuid4()),
-        "git_commit": git(root, "rev-parse", "HEAD"),
-        "worktree_dirty": bool(git(root, "status", "--porcelain")),
+        "git_commit": state["git_commit"],
+        "worktree_dirty": state["worktree_dirty"],
         "command": command,
         "started_at": now_iso(),
         "finished_at": now_iso(),
@@ -639,6 +649,7 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     root = Path(args.root).resolve()
+    state = repo_state(root)
     report_dir = Path(args.report_dir).expanduser() if args.report_dir else root / "reports"
     if not report_dir.is_absolute():
         report_dir = root / report_dir
@@ -666,7 +677,7 @@ def main(argv=None):
     weights = {item["id"]: item["weight"] for item in matrix["reports"]}
     reports, total, all_passed = [], 0.0, True
     for report_id, report_type, checks in groups:
-        report = make_report(report_id, report_type, checks, root)
+        report = make_report(report_id, report_type, checks, root, git_state=state)
         contracts.validate_report(report)
         path = write_report(report, report_id)
         weight = float(weights.get(report_id, 0))
@@ -675,7 +686,8 @@ def main(argv=None):
         reports.append({"id": report_id, "passed": report["passed"], "score": report["score"], "weight": weight,
                         "file": str(path.relative_to(root)) if path and path.is_relative_to(root) else str(path) if path else None})
 
-    rollback = make_report("8_rollback_drill_report", "RollbackDrillValidation", [run_check("sqlite_transaction_rollback", rollback_probe)], root)
+    rollback = make_report("8_rollback_drill_report", "RollbackDrillValidation",
+                           [run_check("sqlite_transaction_rollback", rollback_probe)], root, git_state=state)
     contracts.validate_report(rollback)
     rollback_path = write_report(rollback, "8_rollback_drill_report")
     weight = float(weights.get("8_rollback_drill_report", 0))
@@ -764,8 +776,8 @@ def main(argv=None):
     summary = {
         "evaluation_title": "aisk 99.9+ executable contract verification",
         "evaluated_at": now_iso(),
-        "git_commit": git(root, "rev-parse", "HEAD"),
-        "worktree_dirty": bool(git(root, "status", "--porcelain")),
+        "git_commit": state["git_commit"],
+        "worktree_dirty": state["worktree_dirty"],
         "offline_mode": True,
         "final_score": round(final_score, 2),
         "offline_contract_score": round(total, 2),
