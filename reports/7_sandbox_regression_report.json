@@ -1,13 +1,13 @@
 {
   "report_id": "7_sandbox_regression_report",
   "report_type": "SandboxContractRegression",
-  "run_id": "bab658fd-742a-44a9-a6ed-fe24cf50311a",
-  "git_commit": "53aa9dfeee41822c43e422eaacbf6b17a6e64bda",
-  "worktree_dirty": true,
+  "run_id": "e9facc85-e101-4d94-a26b-d17436c7ea82",
+  "git_commit": "ef3e6723d2010e0e27f3e7cbf1e8c714c210f8e0",
+  "worktree_dirty": false,
   "command": "python3 tools/verify_spec.py",
-  "started_at": "2026-09-19T12:38:14.494+00:00",
-  "finished_at": "2026-09-19T12:38:14.494+00:00",
-  "duration_ms": 388.504,
+  "started_at": "2026-09-27T15:56:04.764+00:00",
+  "finished_at": "2026-09-27T15:56:04.764+00:00",
+  "duration_ms": 274.537,
   "offline_validated": true,
   "passed": true,
   "score": 100.0,
@@ -16,7 +16,7 @@
       "check_id": "spec_json_syntax",
       "command": "python3 tools/verify_spec.py",
       "exit_code": 0,
-      "duration_ms": 1.725,
+      "duration_ms": 0.772,
       "stdout_digest": "",
       "stderr_digest": "",
       "passed": true,
@@ -26,36 +26,36 @@
       "check_id": "contract_unit_tests",
       "command": "python3 -m unittest discover -s agent-skills/tests -p test_contracts.py",
       "exit_code": 0,
-      "duration_ms": 112.542,
+      "duration_ms": 119.323,
       "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "stderr_digest": "fc827540616121b1a004e635148c02faab8889a9b4ce20cf29a8788294430ef9",
+      "stderr_digest": "970f2c3893cc1d90798d5af1d6840832eab1f1a1c3eb28da1db1d495b832e02c",
       "passed": true,
-      "details": ".......\n----------------------------------------------------------------------\nRan 7 tests in 0.030s\n\nOK"
+      "details": ".....\n----------------------------------------------------------------------\nRan 5 tests in 0.053s\n\nOK"
     },
     {
       "check_id": "action_context_regression",
       "command": "python3 -m unittest discover -s agent-skills/tests -p test_action_context.py",
       "exit_code": 0,
-      "duration_ms": 124.938,
+      "duration_ms": 92.549,
       "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "stderr_digest": "670a39115e7523a8984e4842e16547cb2094b03fad392b037b4b9dc8b2656e62",
+      "stderr_digest": "5f0635b83af38a6c5d516fcb60dc3fa63c9c6ca4854e51a6a29ca33c92ccef16",
       "passed": true,
-      "details": ".......\n----------------------------------------------------------------------\nRan 7 tests in 0.003s\n\nOK"
+      "details": ".........\n----------------------------------------------------------------------\nRan 9 tests in 0.004s\n\nOK"
     },
     {
       "check_id": "token_efficiency_regression",
       "command": "python3 -m unittest discover -s agent-skills/tests -p test_token_efficiency.py",
       "exit_code": 0,
-      "duration_ms": 149.299,
+      "duration_ms": 61.893,
       "stdout_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "stderr_digest": "27c4a39d34ece4cbc66cc59cb0870c7abe4cc0a5f009205bdd0ea06a93f8b3ac",
+      "stderr_digest": "d1276a2d9d79b9ed0a61446aa751886a8b573a45c52c4fe838159bc8be061837",
       "passed": true,
-      "details": "...\n----------------------------------------------------------------------\nRan 3 tests in 0.007s\n\nOK"
+      "details": "..\n----------------------------------------------------------------------\nRan 2 tests in 0.011s\n\nOK"
     }
   ],
-  "input_digest": "5c4a47b201b3f4875fc062d66cb0d76d378c574c646d673afc2590c3aff46809",
-  "spec_digest": "73bd3978d02a6b6812c228a0f0eea5a145aaf67cd572d2afb126ca296d689305",
-  "content_digest": "6ae20c168558d68aee735394b1a812a51b13384aeb2e78f0cd78f2f4d0909f9e",
+  "input_digest": "faec7c27c6c8edde10f6b8048e7e2c015727130f8a1a68de60463e0f0f1d0eb5",
+  "spec_digest": "1e7cfa756f8ead788236ebaae6b56e301144d435a88343b932e3cd5902fce62f",
+  "content_digest": "fc27d17e8601215064eb5d4716b9504e455d99626b4db0a46e96b78b4fac5899",
   "validation_scope": "offline_contract",
   "real_file_checked": false
 }

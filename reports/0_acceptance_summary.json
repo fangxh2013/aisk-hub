@@ -1,95 +1,41 @@
 {
   "evaluation_title": "aisk 99.9+ executable contract verification",
-  "evaluated_at": "2026-09-19T12:38:15.836+00:00",
-  "git_commit": "53aa9dfeee41822c43e422eaacbf6b17a6e64bda",
-  "worktree_dirty": true,
+  "evaluated_at": "2026-09-27T15:56:04.787+00:00",
+  "git_commit": "ef3e6723d2010e0e27f3e7cbf1e8c714c210f8e0",
+  "worktree_dirty": false,
   "offline_mode": true,
   "final_score": 100.0,
   "offline_contract_score": 100.0,
   "offline_contract_certified": true,
-  "real_file_score": 100.0,
-  "real_runtime_score": 100.0,
-  "real_runtime_certified": true,
-  "runtime_status": "runtime-certified",
+  "real_file_score": null,
+  "real_runtime_score": null,
+  "real_runtime_certified": false,
+  "runtime_status": "offline-only",
   "real_file_validation": {
-    "status": "file-checked",
-    "score": 100.0,
-    "certified": true,
-    "manifest_supplied": true,
-    "lock_supplied": true,
-    "details": "真实 Overlay v2 通过，manifest_digest=d5ad89a7139c33730891122c2c785fed28b9cd0adbceb02ccbde17947c742b7a",
-    "check": {
-      "check_id": "real_private_overlay_manifest",
-      "command": "python3 tools/verify_spec.py --private-manifest <private-path>",
-      "exit_code": 0,
-      "duration_ms": 0.621,
-      "stdout_digest": "",
-      "stderr_digest": "",
-      "passed": true,
-      "details": "真实 Overlay v2 通过，manifest_digest=d5ad89a7139c33730891122c2c785fed28b9cd0adbceb02ccbde17947c742b7a"
-    }
+    "status": "offline-only",
+    "score": null,
+    "certified": false,
+    "manifest_supplied": false,
+    "lock_supplied": false,
+    "details": "未提供真实 private manifest；本次仅完成离线契约验证。"
   },
   "real_runtime_validation": {
-    "status": "runtime-certified",
-    "score": 100.0,
-    "certified": true,
-    "details": "所有真实客户端与外部系统运行时探针均 100% 通过",
-    "probes": [
-      {
-        "check_id": "runtime_client_dispatch_probe",
-        "command": "aisk link --dry-run",
-        "exit_code": 0,
-        "duration_ms": 420.94,
-        "stdout_digest": "",
-        "stderr_digest": "",
-        "passed": true,
-        "details": "四工具+五适配端分发 dry-run 验证通过，9 个 canonical 技能正确路由"
-      },
-      {
-        "check_id": "runtime_task_board_probe",
-        "command": "aisk task board",
-        "exit_code": 0,
-        "duration_ms": 534.761,
-        "stdout_digest": "",
-        "stderr_digest": "",
-        "passed": true,
-        "details": "SQLite CAS 协同任务状态与看板查询正常"
-      },
-      {
-        "check_id": "runtime_fact_discovery_probe",
-        "command": "aisk --profile xinhua fact --env dev service goods",
-        "exit_code": 0,
-        "duration_ms": 138.862,
-        "stdout_digest": "",
-        "stderr_digest": "",
-        "passed": true,
-        "details": "真实环境 K8s Manifest 与配置中心事实解析通过"
-      },
-      {
-        "check_id": "runtime_alias_resolution_probe",
-        "command": "aisk skill resolve <alias>",
-        "exit_code": 0,
-        "duration_ms": 5.514,
-        "stdout_digest": "",
-        "stderr_digest": "",
-        "passed": true,
-        "details": "旧技能逻辑别名动态路由到 canonical 领域技能通过"
-      },
-      {
-        "check_id": "runtime_dialog_protocol_probe",
-        "command": "engine.action_context.ActionContext(...)",
-        "exit_code": 0,
-        "duration_ms": 5.751,
-        "stdout_digest": "",
-        "stderr_digest": "",
-        "passed": true,
-        "details": "macOS 原生实名弹窗与 fail-closed 拦截协议运行时检验通过"
-      }
-    ]
+    "status": "offline-only",
+    "score": null,
+    "certified": false,
+    "details": "本工具不执行真实客户端联调；real_runtime_score 需要客户端实机证据，本次未提供。"
+  },
+  "local_smoke_validation": {
+    "status": "not-run",
+    "probes": [],
+    "details": "未请求本机冒烟探针（--probe-runtime）。"
   },
   "all_reports_passed": true,
   "is_99_plus_certified": true,
-  "certification_note": "is_99_plus_certified: offline_contract 与 real_runtime 均达到 100.0 分并通过真实联调验证。",
+  "certified_layers": [
+    "offline_contract"
+  ],
+  "certification_note": "离线契约通过 99.9+ 门禁；真实文件未校验（未提供 manifest/lock）；未运行本机冒烟探针；真实运行时未联调，本结论不代表实机通过。",
   "reports": [
     {
       "id": "1_skill_migration_report",
