@@ -35,8 +35,18 @@ def run(args, cwd=None, check=True, input_text=None, optional_locks=True, env_ex
         env["GIT_OPTIONAL_LOCKS"] = "0"
     if env_extra:
         env.update(env_extra)
-    r = subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, input=input_text,
-                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if input_text is None:
+        r = subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+    else:
+        # 喂给 git 的内容按字节写：Windows 上文本模式会把 \n 写成 \r\n（提交说明被写成 CRLF）
+        raw = subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env,
+                             input=input_text.encode("utf-8"), capture_output=True)
+
+        def decoded(data):
+            return data.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+
+        r = subprocess.CompletedProcess(raw.args, raw.returncode, decoded(raw.stdout), decoded(raw.stderr))
     if check and r.returncode != 0:
         detail = (r.stderr or r.stdout or "").strip()
         raise WtError(f"git {' '.join(str(a) for a in args)} 失败（{cwd}）：\n{detail}")

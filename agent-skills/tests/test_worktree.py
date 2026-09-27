@@ -1745,5 +1745,109 @@ class AddRepoAdmission(Sandbox):
         self.assertIn("独立任务", str(ctx.exception))
 
 
+class StuckFlowMessages(Sandbox):
+    """2026-09-27 Windows：流程本身没坏，是结论来得晚、报错没说清，AI 重跑门禁、翻源码，转不出来。"""
+
+    def test_check_on_dirty_worktree_fails_fast_without_running_gate(self):
+        self.cfg.repos["be"].gate = {"kind": "command", "argv": ["false"]}
+        task = self.new()
+        (Path(task["repos"]["be"]["path"]) / "draft.txt").write_text("未提交\n")
+        out = io.StringIO()
+        with patch.object(gates, "run_gate") as gate, contextlib.redirect_stdout(out):
+            self.assertEqual(self.run_cmd(f"check {task['id']}"), 1)
+        gate.assert_not_called()
+        self.assertIn("draft.txt", out.getvalue())
+        self.assertIn(f"commit {task['id']}", out.getvalue())
+        self.assertFalse(self.reg.load(task["id"])["check"]["results"]["be"]["ok"])
+
+    def test_check_announces_gate_before_running_it(self):
+        self.cfg.repos["be"].gate = {"kind": "command", "argv": ["true"]}
+        task = self.new()
+        self.commit(task)
+        out, seen = io.StringIO(), {}
+
+        def gate(*_a, **_k):
+            seen["before"] = out.getvalue()
+            return True, "门禁命令通过"
+
+        with patch.object(gates, "run_gate", side_effect=gate), contextlib.redirect_stdout(out):
+            self.assertEqual(self.run_cmd(f"check {task['id']}"), 0)
+        self.assertIn("门禁运行中", seen["before"])
+        self.assertIn(f"check-be-", seen["before"], "要告诉人日志在哪")
+
+    def test_land_on_landed_task_is_a_successful_no_op(self):
+        task = self.new()
+        self.commit(task)
+        self.ready(task)
+        self.assertEqual(self.run_cmd(f"land {task['id']}"), 0)
+        head = git.sha(self.repo, "fxh")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.run_cmd(f"land {task['id']}"), 0)
+            self.assertEqual(self.run_cmd(f"land {task['id']} --dry-run"), 0)
+        self.assertIn("无需再 land", out.getvalue())
+        self.assertEqual(git.sha(self.repo, "fxh"), head)
+        self.assertEqual(self.reg.load(task["id"])["state"], "landed")
+
+    def test_land_before_ready_says_check_then_ready(self):
+        task = self.new()
+        with self.assertRaises(WtError) as ctx:
+            self.run_cmd(f"land {task['id']}")
+        self.assertIn(f"check {task['id']}", str(ctx.exception))
+        self.assertIn(f"ready {task['id']}", str(ctx.exception))
+
+    def test_dev_delivery_refusal_names_what_is_missing_and_where_to_go(self):
+        with self.assertRaises(integrate.Reject) as ctx:
+            self.run_cmd("merge-dev --repo be --dry-run")
+        text = str(ctx.exception)
+        self.assertIn("不是 xinhua", text)
+        self.assertIn("automatic", text)
+        self.assertIn("不要改用 git push 绕过", text)
+        self.cfg.os = "windows"
+        with self.assertRaises(integrate.Reject) as ctx:
+            integrate._personal_delivery_config(self.cfg, "be")
+        self.assertIn("Mac 集成面", str(ctx.exception))
+
+    def test_cas_and_commit_message_reach_git_as_bytes(self):
+        """Windows 上文本模式管道把 \\n 写成 \\r\\n：update-ref --stdin 读到 start\\r 就报 unknown command。"""
+        task = self.new()
+        self.commit(task)
+        self.ready(task)
+        proc = integrate.subprocess
+        real_popen, real_run = proc.Popen, proc.run
+        seen = {"cas": [], "commit_tree": []}
+
+        def popen(cmd, *a, **kw):
+            if "update-ref" in cmd:
+                seen["cas"].append(kw)
+            return real_popen(cmd, *a, **kw)
+
+        def run(cmd, *a, **kw):
+            if "commit-tree" in cmd:
+                seen["commit_tree"].append(kw)
+            return real_run(cmd, *a, **kw)
+
+        with patch.object(proc, "Popen", side_effect=popen), patch.object(proc, "run", side_effect=run):
+            self.assertEqual(self.run_cmd(f"land {task['id']}"), 0)
+        self.assertTrue(seen["cas"] and seen["commit_tree"])
+        self.assertFalse(any(kw.get("text") or kw.get("encoding") for kw in seen["cas"]))
+        self.assertIsInstance(seen["commit_tree"][0]["input"], bytes)
+        self.assertNotIn(b"\r", seen["commit_tree"][0]["input"])
+        self.assertEqual(self.reg.load(task["id"])["state"], "landed")
+
+    def test_profile_errors_list_only_task_capable_profiles(self):
+        pdir = profile_mod.PROFILE_DIR
+        pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / "alpha.yaml").write_text("project: alpha\nrepos:\n  main: /nonexistent/alpha\n", encoding="utf-8")
+        (pdir / "beta.yaml").write_text("project: beta\nrepos:\n  main: /nonexistent/beta\n"
+                                        "worktrees:\n  data_root: /nonexistent/beta-data\n", encoding="utf-8")
+        hint = wt_config.task_profile_hint()
+        self.assertIn("beta", hint)
+        self.assertNotIn("alpha", hint)
+        with self.assertRaises(WtError) as ctx:
+            build_config({"project": "alpha", "repos": {}}, "mac")
+        self.assertIn("可用于 aisk task 的档案：beta", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

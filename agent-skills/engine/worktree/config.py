@@ -246,12 +246,33 @@ def _as_map(v, where):
     raise WtError(f"档案 {where} 应为映射")
 
 
+def task_profiles():
+    """有 worktrees 一节、能用于 aisk task 的档案名（读不出的档案跳过）。"""
+    usable = []
+    for p in profile_mod.list_profiles():
+        try:
+            prof = profile_mod.load(p)
+        except Exception:  # noqa: BLE001  坏档案不该拖垮报错提示
+            continue
+        if isinstance(prof.get("worktrees"), dict):
+            usable.append(p.stem)
+    return sorted(usable)
+
+
+def task_profile_hint():
+    """找不到或选错档案时告诉 AI 该用哪个，免得逐个试没有 worktrees 的档案（2026-09-27 Windows）。"""
+    usable = task_profiles()
+    if not usable:
+        return "本机还没有带 worktrees 一节的档案"
+    return f"可用于 aisk task 的档案：{'、'.join(usable)}（例如 {names.CLI} --profile {usable[0]} status）"
+
+
 def build_config(prof, os_name=None):
     """把已加载的档案字典转换为 WtConfig。"""
     os_name = os_name or OS_NAME
     wt = prof.get("worktrees")
     if not isinstance(wt, dict):
-        raise WtError(f"档案 {prof.get('project')} 没有 worktrees 一节（见 WORKTREE.md §7）")
+        raise WtError(f"档案 {prof.get('project')} 没有 worktrees 一节（见 WORKTREE.md §7）；{task_profile_hint()}")
     expand = profile_mod._expand
     data_root = expand(_req(wt, "data_root", "worktrees"))
     integration = str(_req(wt, "integration_branch", "worktrees"))
@@ -504,7 +525,10 @@ def resolve_profile(explicit=None, start=None):
         return hits[0][1], f"当前目录位于 {hits[0][0].stem} 的 worktrees.data_root"
     if len(hits) > 1:
         raise profile_mod.ProfileError("当前目录同时位于多个档案的 data_root，拒绝猜测，请用 --profile 指定")
-    return profile_mod.resolve(None, start)
+    try:
+        return profile_mod.resolve(None, start)
+    except profile_mod.ProfileError as e:
+        raise profile_mod.ProfileError(f"{e}\n{task_profile_hint()}") from e
 
 
 def load_config(explicit=None, start=None):

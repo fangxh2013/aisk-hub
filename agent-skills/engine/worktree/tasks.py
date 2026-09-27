@@ -1174,21 +1174,34 @@ def cmd_check(cfg, reg, args):
     logdir = cfg.logs_dir / task["id"]
     for alias, r in task["repos"].items():
         path = Path(r["path"])
-        changed = sorted(task_changes(cfg, task, alias))
         head = git.sha(path, "HEAD")
-        dirty_before = bool(git.dirty(path))
+        dirty = git.dirty(path)
         log = logdir / f"check-{alias}-{stamp()}.log"
-        try:
-            ok, summary = gates.run_gate(cfg, alias, path, changed, log)
-        except (WtError, OSError) as e:
-            ok, summary = False, str(e)
-        if git.sha(path, "HEAD") != head or git.dirty(path) or dirty_before:
-            ok, summary = False, "自检要求工作区干净、构建前后提交不变：请先提交再 check"
+        if dirty:
+            # 结论反正是不通过，就别先花几分钟跑完整门禁：2026-09-27 W007 在未提交的工作区上先 npm ci
+            # 加完整构建 2 分 43 秒，最后才报「请先提交」；那个 Antigravity 会话里这样白跑了二十多次。
+            shown = [line[3:] for line in dirty[:3]]
+            more = f" 等 {len(dirty)} 个" if len(dirty) > 3 else ""
+            ok, summary = False, (f"工作区有未提交改动（{'、'.join(shown)}{more}），未运行门禁："
+                                  f"先 {names.CLI} commit {task['id']} 再 check")
+        else:
+            kind = cfg.repo(alias).gate.get("kind", "none")
+            if kind != "none":
+                # 门禁要跑几分钟且只写日志；先打一行，不然终端和 AI 都以为卡住了
+                say("info", f"{alias}: 门禁运行中（{kind}），日志 {log}")
+            changed = sorted(task_changes(cfg, task, alias))
+            try:
+                ok, summary = gates.run_gate(cfg, alias, path, changed, log)
+            except (WtError, OSError) as e:
+                ok, summary = False, str(e)
+            if git.sha(path, "HEAD") != head or git.dirty(path):
+                ok, summary = False, "门禁期间提交或工作区发生了变化：提交后重新 check"
         results[alias] = {"sha": head, "ok": ok, "summary": summary, "log": str(log)}
         say("ok" if ok else "err", f"{alias}: {summary}")
         if not ok:
             bad = True
-            print(gates.tail(log))
+            if log.exists():
+                print(gates.tail(log))
     tool, sessions = caller(args)
     with reg.lock():
         task = reg.load(task["id"])

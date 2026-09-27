@@ -28,6 +28,7 @@ class Reject(WtError):
 
 
 MANUAL_ONLY_BRANCHES = {"main", "master"}
+DEV_ANCHOR_HINT = f"档案该仓库的 anchors 要包含 dev，并在本机运行 {names.CLI} init --apply 建立锚点"
 DEFAULT_PROTECTED_PUSH_BRANCHES = {"dev", "main", "master"}
 
 
@@ -224,15 +225,21 @@ def ff_compare_and_swap(repo, branch, expected_old, candidate, *, journal_path=N
     env["LANGUAGE"] = "C"
     command = [git.git_exe(), "-c", "core.quotepath=false", "update-ref", "--stdin",
                "-m", f"merge {branch}: Fast-forward"]
+    # 二进制管道、显式 \n：Windows 上文本模式管道会把 \n 写成 \r\n，update-ref --stdin 读到「start\r」
+    # 就报 unknown command: start?（2026-09-27 Windows 落地 W005 在快进这一步失败，重跑又过）。
     process = subprocess.Popen(command, cwd=str(repo), env=env, stdin=subprocess.PIPE,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                               encoding="utf-8", errors="replace", bufsize=1)
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+
+    def send(text):
+        process.stdin.write(text.encode("utf-8"))
+        process.stdin.flush()
 
     def collect(timeout=None):
         if process.stdin and not process.stdin.closed:
             process.stdin.close()
         code = process.wait(timeout=timeout)
-        stdout, stderr = process.stdout.read(), process.stderr.read()
+        stdout = process.stdout.read().decode("utf-8", "replace")
+        stderr = process.stderr.read().decode("utf-8", "replace")
         process.stdout.close()
         process.stderr.close()
         return stdout, stderr, code
@@ -240,8 +247,7 @@ def ff_compare_and_swap(repo, branch, expected_old, candidate, *, journal_path=N
     prepared = False
     tree_updated = False
     try:
-        process.stdin.write(f"start\nupdate {ref} {candidate} {expected_old}\nprepare\n")
-        process.stdin.flush()
+        send(f"start\nupdate {ref} {candidate} {expected_old}\nprepare\n")
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if process.poll() is not None:
@@ -256,8 +262,7 @@ def ff_compare_and_swap(repo, branch, expected_old, candidate, *, journal_path=N
                 pass
             time.sleep(0.01)
         if not prepared:
-            process.stdin.write("abort\n")
-            process.stdin.flush()
+            send("abort\n")
             process.stdin.close()
             stdout, stderr, _ = collect()
             if journal and not preserve_journal_on_failure:
@@ -266,8 +271,7 @@ def ff_compare_and_swap(repo, branch, expected_old, candidate, *, journal_path=N
 
         tree_update = git.run(["read-tree", "-m", "-u", expected_old, candidate], cwd=repo, check=False)
         if tree_update.returncode != 0:
-            process.stdin.write("abort\n")
-            process.stdin.flush()
+            send("abort\n")
             process.stdin.close()
             stdout, stderr, _ = collect()
             detail = (tree_update.stderr or stderr or stdout).strip()[-300:]
@@ -276,8 +280,7 @@ def ff_compare_and_swap(repo, branch, expected_old, candidate, *, journal_path=N
             raise Reject(f"{branch} 工作区无法安全快进，引用保持不变：{detail}")
         tree_updated = True
 
-        process.stdin.write("commit\n")
-        process.stdin.flush()
+        send("commit\n")
         process.stdin.close()
         stdout, stderr, returncode = collect()
         if returncode != 0:
@@ -287,8 +290,7 @@ def ff_compare_and_swap(repo, branch, expected_old, candidate, *, journal_path=N
     except Exception:
         if process.poll() is None:
             try:
-                process.stdin.write("abort\n")
-                process.stdin.flush()
+                send("abort\n")
                 process.stdin.close()
             except (BrokenPipeError, OSError, ValueError):
                 pass
@@ -524,9 +526,17 @@ def cmd_land(cfg, reg, args):
     dry = args.dry_run
     task = reg.find_by_ref(args.task)
     tid = task["id"]
-    if task["state"] not in ("ready", "queued", "rejected"):
-        raise WtError(f"任务状态 {task['state']}，需要先 aisk task ready")
     aliases = tasks.select_repos(cfg, task, getattr(args, "repos", None))
+    if task["state"] in ("landed", "promoted", "verified", "archived"):
+        # 已经落地的任务再 land 是空操作。旧的「需要先 ready」让 AI 以为落地失败，
+        # 转头去翻内核源码（2026-09-27 Windows 上对早已落地的 W002 反复 land）。
+        landed = "、".join(f"{a}@{(task['repos'][a].get('landed_sha') or '')[:9]}" for a in aliases
+                          if task["repos"][a].get("landed_sha")) or "、".join(aliases)
+        say("ok", f"{tid} 已是 {task['state']}（{landed}），无需再 land；合入或推送主干由操作者按项目流程执行")
+        return 0
+    if task["state"] not in ("ready", "queued", "rejected"):
+        raise WtError(f"任务状态 {task['state']}，还不能 land：先 {names.CLI} check {tid}，"
+                      f"通过后 {names.CLI} ready {tid}")
     if not any(task["repos"][a].get("ready_sha") for a in aliases):
         raise WtError("所选仓库都还没有 ready，修复后先 aisk task ready")
     if task.get("base_task"):
@@ -780,13 +790,23 @@ def _personal_delivery_config(cfg, alias):
     rc = cfg.repo(alias)
     reject_main_target(cfg, cfg.integration, rc.push_branch, rc.trunk)
     automatic = getattr(rc, "automatic", {}) or {}
-    if (getattr(cfg, "profile_name", "") != "xinhua" or alias not in ("be", "web")
-            or rc.workspace_mode != "task-worktree" or cfg.integration != "fxh"
-            or rc.trunk != "dev" or rc.push_branch != "fxh-dev"
-            or automatic.get("commit_task_branch") is not True
-            or automatic.get("land_to_local") != "fxh"
-            or automatic.get("push_only") != "fxh-dev"):
-        raise Reject(f"{alias} 不是 fxh → fxh-dev/dev 前后端交付配置；拒绝复用个人推送流程")
+    missing = [what for what, bad in (
+        (f"档案 {getattr(cfg, 'profile_name', '')} 不是 xinhua", getattr(cfg, "profile_name", "") != "xinhua"),
+        (f"仓库 {alias} 不是 be/web", alias not in ("be", "web")),
+        ("workspace_mode 不是 task-worktree", rc.workspace_mode != "task-worktree"),
+        (f"集成分支是 {cfg.integration} 不是 fxh", cfg.integration != "fxh"),
+        (f"trunk/push_branch 是 {rc.trunk}/{rc.push_branch} 不是 dev/fxh-dev",
+         rc.trunk != "dev" or rc.push_branch != "fxh-dev"),
+        (f"worktrees.repos.{alias}.automatic 没有声明 commit_task_branch: true、land_to_local: fxh、push_only: fxh-dev",
+         automatic.get("commit_task_branch") is not True or automatic.get("land_to_local") != "fxh"
+         or automatic.get("push_only") != "fxh-dev"),
+    ) if bad]
+    if missing:
+        # 说清缺什么、该去哪做：只说「拒绝」时，AI 会翻源码找原因，最后退回裸 git push（2026-09-27 Windows）
+        where = ("Windows 默认只开发到 ready，fxh/dev 的落地、合并和推送在 Mac 集成面执行"
+                 if cfg.os == "windows" else "按 WORKTREE.md §7 在本机档案补齐后再执行")
+        raise Reject(f"{alias} 不是 fxh → fxh-dev/dev 前后端交付配置（{'；'.join(missing)}）。"
+                     f"{where}；不要改用 git push 绕过")
     return rc
 
 
@@ -894,7 +914,7 @@ def merge_integration_to_local_dev(cfg, reg, alias, args=None, *, dry=False):
     _validate_xinhua_origin(cfg, alias, anchor)
     with file_lock(tasks.land_lock_path(cfg, alias), wait_msg=f"{alias} 有落地/推送正在进行，排队"):
         if not anchor.exists() or git.current_branch(anchor) != "dev":
-            raise Reject(f"本地 dev 锚点不存在或分支错误：{anchor}")
+            raise Reject(f"本地 dev 锚点不存在或分支错误：{anchor}；{DEV_ANCHOR_HINT}")
         if git.dirty(anchor):
             raise Reject(f"本地 dev 锚点有未提交改动：{anchor}")
         if git.current_branch(repo) != "fxh":
@@ -938,7 +958,7 @@ def push_local_dev(cfg, reg, alias, args=None, *, dry=False):
     _validate_xinhua_origin(cfg, alias, anchor)
     with file_lock(tasks.land_lock_path(cfg, alias), wait_msg=f"{alias} 有落地/推送正在进行，排队"):
         if not anchor.exists() or git.current_branch(anchor) != "dev":
-            raise Reject(f"本地 dev 锚点不存在或分支错误：{anchor}")
+            raise Reject(f"本地 dev 锚点不存在或分支错误：{anchor}；{DEV_ANCHOR_HINT}")
         if git.dirty(anchor):
             raise Reject(f"本地 dev 锚点有未提交改动：{anchor}")
         fetched = git.run(["fetch", "origin", "refs/heads/dev:refs/remotes/origin/dev"], cwd=repo, check=False)
