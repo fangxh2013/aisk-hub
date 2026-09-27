@@ -49,6 +49,10 @@ agent-skills/tests/*
 !agent-skills/tests/test_action_context.py
 !agent-skills/tests/test_token_efficiency.py
 !agent-skills/tests/test_worktree.py
+!agent-skills/tests/test_mcp_server.py
+!agent-skills/tests/test_miniyaml.py
+!agent-skills/tests/test_token_runtime_golden.py
+!agent-skills/tests/token_runtime_golden_tasks.json
 !agent-skills/tests/protocol_worktree.sh
 **/__pycache__/
 **/.pytest_cache/

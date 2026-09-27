@@ -12,7 +12,7 @@ from . import autoflow, direct_tasks, doctor, guards, hooks, integrate, legacy, 
 from .config import WtError, load_config
 from .registry import Registry, file_lock, say
 
-USAGE = """aisk task：多 AI 并行任务工作区。说明见 agent-skills 的 WORKTREE.md 与技能 ai-worktree。
+USAGE = """aisk task：多 AI 并行任务工作区。说明见技能 ai-worktree 与 docs/COORDINATION.md，档案写法见 agent-skills/templates/worktree-profile.example.yaml。
 
 找活与认领：
   aisk task find <关键词>            aisk task status              aisk task claim <任务> --tool <工具>

@@ -9,15 +9,15 @@
 1. **进程识别**：
    在 `engine/worktree/actor.py` 中，`PROCESS_NAMES["antigravity"] = ("language_server",)`。内核向上遍历调用栈识别 `language_server` 进程特征，判定当前调用端为 Antigravity。
 2. **会话 ID 注入**：
-   宿主通过上下文注入会话标识 `conversationId`（如 `aa5ceee7-7a1d-4721-be38-c0419f3e6145`），内核将其作为 `owner_session` 记入协同状态机，实现会话级任务隔离与续租。
-3. **协同状态与 Fencing Token**：
-   Antigravity 认领任务（`claim`）时，SQLite 状态机分配严格单调递增的 `fencing_token`。所有后续心跳与状态迁移必须携带并校验该 Token，阻断网络分区或长时挂起恢复后的僵尸写覆盖。
+   宿主通过钩子输入注入会话标识 `conversationId`（如 `aa5ceee7-7a1d-4721-be38-c0419f3e6145`），内核把它与工具名一起记进任务登记簿的认领记录，实现会话级任务隔离与续租。
+3. **协同租约与接手**：
+   Antigravity 认领任务（`claim`）后，写入前由守卫核对执行者：工具名与会话号都一致才放行。空闲过久被其他会话接手后，原会话的写入会被拒绝（`aisk task` 不使用 fencing token；SQLite + fencing 的契约参考实现见 `docs/COORDINATION.md`「本地状态存储边界」）。
 
 ---
 
-## 二、人工确认与系统原生弹窗规范（macOS AppleScript / Windows WinForms）
+## 二、人工确认与系统原生弹窗规范（macOS AppleScript / Windows TaskDialog）
 
-在 Antigravity 中，凡涉及**合并主干（dev/master/main）、推送远端、落地代码（land/promote）、执行 DDL/SQL 迁移或生产发布等关键/高危操作**，必须通过当前操作系统的原生弹窗向用户请求确认：macOS 使用 `/usr/bin/osascript`，Windows 使用当前交互桌面的 PowerShell WinForms；严禁静默执行或仅在聊天会话中假定已授权。
+在 Antigravity 中，凡涉及**合并主干（dev/master/main）、推送远端、落地代码（land/promote）、执行 DDL/SQL 迁移或生产发布等关键/高危操作**，必须通过当前操作系统的原生弹窗向用户请求确认：macOS 使用 `/usr/bin/osascript`，Windows 使用当前交互桌面的原生 TaskDialog（ctypes 调用 comctl32）；严禁静默执行或仅在聊天会话中假定已授权。
 
 ### 1. 标题协议与调用范式
 - **标题标准**：`动作-antigravity｜<任务号>`（如 `落地代码-antigravity｜T001`）
@@ -38,7 +38,7 @@ Antigravity 通过 Stdio 换行分隔的 JSON-RPC 2.0 协议直连内核提供�
 
 | 工具名 | 类型 | 功能说明 | 典型返回语义 |
 | :--- | :---: | :--- | :--- |
-| **`aisk_task_inspect`** | 协同感知 | 只读查询 SQLite WAL 任务状态、租约到期时间、Fencing Token、持有者及挂起事件 | `live` / 结构化状态 |
+| **`aisk_task_inspect`** | 协同感知 | 只读查询 `aisk task` 任务登记簿：状态、执行者、租约（持有中/空闲/可接手）、下一步 | `live` / 结构化状态 |
 | **`aisk_fact_service`** | 运维事实 | 查询微服务运维事实（镜像、Deployment、Job、DataId、NodePort），支持 `brief: true` 精简模式 | `offline_snapshot` |
 | **`aisk_fact_entry`** | 运维事实 | 查询对外入口与映射端口（向后兼容保留，底层对齐 `fact_service(brief=True)`） | `offline_snapshot` |
 | **`aisk_env_summary`** | 拓扑事实 | 查询环境基础拓扑、主机 IP、K8s 命名空间与服务全景 | `offline_snapshot` |
@@ -47,7 +47,7 @@ Antigravity 通过 Stdio 换行分隔的 JSON-RPC 2.0 协议直连内核提供�
 
 ### 2. 数据可用性四态契约
 MCP 返回严格遵循 `mcp-response.schema.json` 契约：
-- `live`：实时真实网络/数据库连接（仅当数据库物理连接成功或直连 SQLite 状态库时返回）；
+- `live`：实时读取的当前状态（数据库物理连接成功，或读取本机任务登记簿时返回）；
 - `offline_cached`：经校验的本地缓存事实；
 - `offline_snapshot`：静态部署清单（Manifest）事实快照；
 - `offline_unavailable`：离线/断网不可达。**离线状态下绝不伪造任何虚假 SQL 查询结果**。

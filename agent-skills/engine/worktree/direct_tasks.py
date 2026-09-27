@@ -13,7 +13,6 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from types import SimpleNamespace
 
 from .. import direct_checkout
 from . import gates, gitops as git, model, publish_pending, tasks
@@ -84,7 +83,6 @@ def cmd_new(cfg: WtConfig, reg: Registry, args):
         raise WtError("未识别到会话号，请设置 AISK_SESSION 或传 --session")
 
     with reg.lock():
-        check = SimpleNamespace(paths=[], all=False)
         # Direct work consumes an active task slot but never a worktree slot.
         tasks.check_quota(cfg, reg, repos=[], materialize=[])
         tid = reg.next_id()

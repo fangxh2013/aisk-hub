@@ -9,7 +9,7 @@ levels:
     target: aisk-private / 团队共享
     leak_severity: low
   CONFIDENTIAL:
-    definition: 新华内部微服务真实拓扑、实际端口映射、生产日志结构、内网IP
+    definition: 业务项目内部微服务真实拓扑、实际端口映射、生产日志结构、内网IP
     target: aisk-private / 本机专有
     leak_severity: high_block
   SECRET:
@@ -18,6 +18,7 @@ levels:
     leak_severity: critical_block
 ci_enforcement:
   git_history_scope: 公开 master 与显式公开 Tag 的全历史提交；本地 aisk task 分支属于运行态，不进入公开发布面
+  git_history_baseline: spec/privacy-history-baseline.yaml 按「完整提交号:路径:规则:行号」精确放行已从文件树删除、且已进入 origin/master 的命中；顶端提交永不放行，工作树扫描与 --since 发布门禁不读基线
   working_tree_scope: 工作区全量文本文件
   export_mode: allowlist_only
   block_action: exit_1_fail_ci

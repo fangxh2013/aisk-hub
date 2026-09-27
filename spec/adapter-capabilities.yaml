@@ -218,7 +218,7 @@ dialog_protocol:
   fallback_no_model: '{action}-{tool}｜{task_id}'
   platform_backends:
     macos: osascript
-    windows: powershell_winforms
+    windows: taskdialog_comctl32
   required_fields:
   - action
   - tool

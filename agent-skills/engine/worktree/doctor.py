@@ -628,7 +628,7 @@ def check_data_root(cfg, rep):
             rep.warn(f"数据根在 git 仓库 {anc} 之内：在那里执行 git clean -fdx 会连任务数据一起删（写进 .gitignore 也挡不住 -x）")
             break
     if (root / "lanes").is_dir() and not cfg.legacy_root:
-        rep.warn(f"数据根下有旧版 lanes/ 布局但档案没有声明 worktrees.legacy.root：旧槽位不会被识别，迁移步骤见 WORKTREE.md")
+        rep.warn(f"数据根下有旧版 lanes/ 布局但档案没有声明 worktrees.legacy.root：旧槽位不会被识别；在档案里声明 worktrees.legacy.root 指向旧数据根（见 agent-skills/templates/worktree-profile.example.yaml 末尾说明）")
     if not root.exists():
         rep.err(f"数据根 {root} 不存在：先 {names.CLI} init 预览再 --apply")
 

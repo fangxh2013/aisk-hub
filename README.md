@@ -205,5 +205,4 @@ git diff --check
 真实弹窗/钩子联调后才能填写；本地模拟分发、静态检查和临时目录 smoke test 不得冒充实机通过。
 
 更完整的隐私边界、适配矩阵、迁移步骤和回滚流程见 `docs/PRIVACY.md`、`docs/ADAPTERS.md`、
-`docs/AI-ONBOARDING.md`、`docs/PRIVATE-OVERLAY-USER-GUIDE.md`、`MIGRATION_PLAN_CODEX.md` 与
-`docs/COORDINATION.md`。
+`docs/AI-ONBOARDING.md`、`docs/PRIVATE-OVERLAY-USER-GUIDE.md` 与 `docs/COORDINATION.md`。

@@ -86,11 +86,17 @@ def claude_rename_count():
     return len(link.CLAUDE_RENAMES)
 
 
+def mcp_tool_count():
+    from engine import mcp_server
+    return len(mcp_server.TOOLS)
+
+
 FACTS = {
     "skill_count": (skill_count, "内核 skills/*/SKILL.md 计数"),
     "endpoint_count": (endpoint_count, "engine/link.py 的 TARGETS 端数"),
     "default_endpoint_count": (default_endpoint_count, "engine/link.py 的 DEFAULT_TOOLS 端数"),
     "claude_rename_count": (claude_rename_count, "engine/link.py 的 CLAUDE_RENAMES 条数"),
+    "mcp_tool_count": (mcp_tool_count, "engine/mcp_server.py 的 TOOLS 个数"),
 }
 
 # ------------------------------------------------------------------ 断言注册表
@@ -106,6 +112,9 @@ CLAIMS = [
     ("README.md", "开头：分发端数", rf"分发到 ({NUM}) 个端", "endpoint_count"),
     ("README.md", "开头：Claude 端改名数", rf"端上改名.*?({NUM}) 个技能改了名", "claude_rename_count"),
     ("docs/AI-ONBOARDING.md", "`aisk link` 默认端数", rf"分发到默认 ({NUM}) 个端", "default_endpoint_count"),
+    ("agent-skills/README.md", "MCP 工具数", rf"当前 MCP 暴露 ({NUM}) 个", "mcp_tool_count"),
+    ("agent-skills/adapters/antigravity/README.md", "MCP 工具数", rf"暴露的 ({NUM}) 大结构化工具", "mcp_tool_count"),
+    ("agent-skills/adapters/workbuddy-ai/README.md", "MCP 工具数", rf"内核的 ({NUM}) 个 MCP 工具", "mcp_tool_count"),
 ]
 
 # 端名覆盖：TARGETS 里每个端都必须在这些文档里被点名。

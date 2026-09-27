@@ -435,7 +435,7 @@ def cmd_link(args):
                 "version": "2.0.0",
                 "description": "项目无关的 AI 技能内核（由 aisk link 生成，勿手工编辑）",
                 "author": {"name": "agent-skills"},
-                "license": "Apache-2.0",
+                "license": "MIT",
             })
             _out(f"   plugin.json -> {f_plugin}")
             f_rules = link.write_antigravity_rules()
@@ -962,7 +962,8 @@ def cmd_public_scan(args):
         _out(f"public-root: {root}")
         if findings:
             for item in findings:
-                _out(f"❌ {item['rule']} {item['path']}:{item['line']}")
+                detail = f"：{item['detail']}" if item.get("detail") else ""
+                _out(f"❌ {item['rule']} {item['path']}:{item['line']}{detail}")
         else:
             _out("✅ 未发现默认隐私规则命中")
     return 0 if not findings else 1
@@ -971,20 +972,31 @@ def cmd_public_scan(args):
 def cmd_public_verify(args):
     root = Path(args.root or __import__("os").environ.get("AISK_HUB_ROOT", Path.cwd())).resolve()
     since = getattr(args, "since", None)
-    ok, findings = privacy.verify(root, since=since)
+    report = privacy.verify_report(root, since=since)
+    ok, findings = report["ok"], report["findings"]
+    accepted, stale = report["accepted_history"], report["stale_history_baseline"]
     if args.json:
-        _out(__import__("json").dumps({"ok": ok, "since": since, "findings": findings}, ensure_ascii=False, indent=2))
+        _out(__import__("json").dumps(report, ensure_ascii=False, indent=2))
     else:
         _out(f"public-root: {root}")
         if since:
             _out(f"范围：merge-base({since}, HEAD)..HEAD 的待发布提交（逐提交检查新增行）")
         if findings:
             for item in findings:
-                _out(f"❌ {item['rule']} {item['path']}:{item['line']}")
+                detail = f"：{item['detail']}" if item.get("detail") else ""
+                _out(f"❌ {item['rule']} {item['path']}:{item['line']}{detail}")
         elif since:
             _out("✅ 待发布提交未引入默认隐私规则命中（完整历史请运行不带 --since 的 public verify）")
+        elif accepted:
+            _out("✅ 工作树与可达 Git 历史均未发现未登记的隐私规则命中")
         else:
             _out("✅ 工作树与可达 Git 历史均未发现默认隐私规则命中")
+        if accepted:
+            commits = len({item["path"].split(":", 1)[0] for item in accepted})
+            _out(f"ℹ️ 已登记的历史债务 {len(accepted)} 条（{commits} 个已发布提交）按 {privacy.BASELINE_RELATIVE} 放行；"
+                 f"它们已从文件树删除，彻底清除需另行批准改写公开历史")
+        if stale:
+            _out(f"ℹ️ {privacy.BASELINE_RELATIVE} 有 {len(stale)} 条已不再命中（历史已改写或规则已变），可以删除")
     return 0 if ok else 1
 
 
@@ -995,7 +1007,8 @@ def cmd_public_export(args):
     if not ok:
         _out("❌ 发布前扫描未通过；必须先完成脱敏")
         for item in findings:
-            _out(f"   {item['rule']} {item['path']}:{item['line']}")
+            detail = f"：{item['detail']}" if item.get("detail") else ""
+            _out(f"   {item['rule']} {item['path']}:{item['line']}{detail}")
         return 1
     if dest.exists() and any(dest.iterdir()) and not args.replace:
         _out(f"❌ 输出目录非空：{dest}；清空后重试或显式传 --replace")

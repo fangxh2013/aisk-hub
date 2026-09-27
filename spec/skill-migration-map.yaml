@@ -29,7 +29,7 @@ skills:
     retained_capabilities:
     - Vue 3 页面与路由动态挂载
     - Element Plus 表格/表单/弹窗 CRUD 模式
-    - 湖北新华 biz-* 专有菜单图标契约
+    - 项目专有菜单图标前缀契约（由私有 Overlay 插槽 menu_icon_prefix 注入）
     - Pinia 状态最小化使用原则
     - v-hasPermi 权限指令与字典联动
     - Vitest 单元测试与构建门禁 (build:dev)
@@ -129,12 +129,12 @@ skills:
     - ai-worktree
     retained_capabilities:
     - 任务状态机流转
-    - 租约管理与 Fencing Token 防僵尸并发
+    - 认领租约（工具名加会话号）与空闲、可接手判定，持有中的任务拒绝他人写入
     - 多工具 (Codex, Claude, Antigravity, WorkBuddy 等) 隔离工作区
-    - Mac 与 Windows 本地 SQLite + Handoff 事件包协议
+    - Mac 与 Windows 通过 hub 中央交换任务分支（Windows ready，Mac land）
     gates:
     - state_transition_valid
-    - fencing_token_verified
+    - lease_owner_verified
   dev-release:
     display_name: 发版受影响分析与清单比对
     legacy_sources:

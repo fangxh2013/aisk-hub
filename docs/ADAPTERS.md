@@ -8,18 +8,18 @@
 
 | 客户端 | 内核标识 | 会话标识来源 | 钩子机制 (Hooks) | 原生弹窗支持 | 适配目录 |
 | :--- | :--- | :--- | :---: | :---: | :--- |
-| **Codex** | `codex` | `CODEX_THREAD_ID` / `CODEX_SESSION_ID` | 弱依赖 (指令级) | ✅ macOS AppleScript / Windows WinForms | `adapters/codex/` |
-| **Claude** | `claude` | `CLAUDE_CODE_SESSION_ID` | ✅ 原生 `settings.json` | ✅ macOS AppleScript / Windows WinForms | `adapters/claude/` |
-| **Antigravity** | `antigravity` | `conversationId` | ✅ Stdio MCP 2.0 | ✅ macOS AppleScript / Windows WinForms | `adapters/antigravity/` |
-| **WorkBuddy** | `workbuddy` | `CODEBUDDY_SESSION_ID` | ✅ `.codebuddy/settings.json` | ✅ macOS AppleScript / Windows WinForms | `adapters/workbuddy/` |
-| **WorkBuddy AI** | `workbuddy-ai` | `CODEBUDDY_SESSION_ID` + `WORKBUDDY_CONFIG_DIR` | ✅ `.codebuddy/settings.json` | ✅ macOS AppleScript / Windows WinForms | `adapters/workbuddy-ai/` |
-| **Cursor** | `cursor` | `AISK_SESSION` / 宿主会话 | ✅ CLI 配置与守卫 | ✅ macOS AppleScript / Windows WinForms | `adapters/cursor/` |
+| **Codex** | `codex` | `CODEX_THREAD_ID` / `CODEX_SESSION_ID` | 弱依赖 (指令级) | ✅ macOS AppleScript / Windows TaskDialog | `adapters/codex/` |
+| **Claude** | `claude` | `CLAUDE_CODE_SESSION_ID` | ✅ 原生 `settings.json` | ✅ macOS AppleScript / Windows TaskDialog | `adapters/claude/` |
+| **Antigravity** | `antigravity` | `conversationId` | ✅ Stdio MCP 2.0 | ✅ macOS AppleScript / Windows TaskDialog | `adapters/antigravity/` |
+| **WorkBuddy** | `workbuddy` | `CODEBUDDY_SESSION_ID` | ✅ `.codebuddy/settings.json` | ✅ macOS AppleScript / Windows TaskDialog | `adapters/workbuddy/` |
+| **WorkBuddy AI** | `workbuddy-ai` | `CODEBUDDY_SESSION_ID` + `WORKBUDDY_CONFIG_DIR` | ✅ `.codebuddy/settings.json` | ✅ macOS AppleScript / Windows TaskDialog | `adapters/workbuddy-ai/` |
+| **Cursor** | `cursor` | `AISK_SESSION` / 宿主会话 | ✅ CLI 配置与守卫 | ✅ macOS AppleScript / Windows TaskDialog | —（无独立适配目录） |
 
 ---
 
 ## 二、高危操作系统原生弹窗契约
 
-凡涉及**合并主干（dev/master/main）、推送受保护分支、落地代码（land/promote）、执行 DDL 迁移或生产发布等关键/高危操作**，必须通过当前操作系统的原生 UI 向用户请求确认，严禁静默执行。个人集成分支（如 `fxh`、`fxh-dev`）的日常 commit/push 默认放行；可用 `merge_policy.confirm_personal_push: true` 重新开启个人推送确认。macOS 使用 `/usr/bin/osascript`；Windows 使用当前交互桌面的 PowerShell WinForms。无图形桌面或弹窗超时统一拒绝。
+凡涉及**合并主干（dev/master/main）、推送受保护分支、落地代码（land/promote）、执行 DDL 迁移或生产发布等关键/高危操作**，必须通过当前操作系统的原生 UI 向用户请求确认，严禁静默执行。个人集成分支（如 `fxh`、`fxh-dev`）的日常 commit/push 默认放行；可用 `merge_policy.confirm_personal_push: true` 重新开启个人推送确认。macOS 使用 `/usr/bin/osascript`；Windows 使用当前交互桌面的原生 TaskDialog（ctypes 调用 comctl32）。无图形桌面或弹窗超时统一拒绝。
 
 ### 1. 标题标准协议
 **标题必须直接可见对应工具名称**，格式严格为：
@@ -36,7 +36,7 @@ branch protection，防止临时 clone 绕过本地守卫。具体服务端设�
 [远端分支保护](REMOTE-BRANCH-PROTECTION.md)。
 
 ### 2. 授权判定铁律
-macOS 只有捕获到 `button returned:<操作动作>` 且 `gave up:false` 时才判定为用户真实授权；Windows 只有 WinForms 的确认按钮返回成功才授权。返回取消、超时或 UI 启动失败必须立即终止操作，严格保持原状。
+macOS 只有捕获到 `button returned:<操作动作>` 且 `gave up:false` 时才判定为用户真实授权；Windows 只有 TaskDialog 返回确认按钮才授权。返回取消、超时或 UI 启动失败必须立即终止操作，严格保持原状。
 
 ---
 

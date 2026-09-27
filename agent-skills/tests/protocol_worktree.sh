@@ -196,7 +196,8 @@ contains "注入上下文" "已为本会话认领"
 check 0 "另一 Claude 会话启动只读" hook_json "{\"hook_event_name\":\"SessionStart\",\"cwd\":\"$TD\",\"session_id\":\"cc-9\"}" hook claude
 contains "只读提示" "只读"
 check 0 "Claude 续做提交" git -C "$WT" commit -qam "test(coupon): 补并发测试"
-sed -i '' 's/（待填写）/无/g' "$TD/HANDOFF.md"
+# 不用 sed -i：BSD sed 要写 -i ''，GNU sed 会把 '' 当成脚本、原文件不动，Linux 上后续 ready 全部失败
+sed 's/（待填写）/无/g' "$TD/HANDOFF.md" > "$TD/HANDOFF.md.tmp" && mv "$TD/HANDOFF.md.tmp" "$TD/HANDOFF.md"
 check 0 "check" env CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=cc-1 python3 "$AISK" task check T001
 check 0 "ready" env CLAUDECODE=1 CLAUDE_CODE_SESSION_ID=cc-1 python3 "$AISK" task ready T001
 

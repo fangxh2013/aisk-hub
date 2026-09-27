@@ -63,7 +63,7 @@ git merge dev
 - **本地弹窗出现但临时 clone 仍能 push `dev`**：远端保护没有生效，立即停止发布并修复服务端规则。
 - **`fxh` 也弹窗**：检查旧 profile 是否把 `fxh` 错列在 `protected`；当前内核会优先按 integration/push_branch
   识别个人面，也可设置 `merge_policy.confirm_personal_push: true` 显式恢复确认。
-- **Windows 没有弹窗**：确认当前进程位于交互桌面、PowerShell/WinForms 可用；无图形会话必须拒绝，不能退化成静默执行。
+- **Windows 没有弹窗**：确认当前进程位于交互桌面、能打开原生 TaskDialog（comctl32）；无图形会话必须拒绝，不能退化成静默执行。
 - **任务 worktree 直接 push**：这是任务隔离违规，应回到 `check → ready → land → promote`；个人分支放行只适用于任务外日常开发工作区。
 
 本地守卫、任务状态机和远端 branch protection 缺一不可；只有三者同时通过，才可称为完整交付闭环。

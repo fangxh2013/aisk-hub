@@ -18,7 +18,7 @@
    - CLI 参数 `--session`
    内核将其映射为 `owner_session`，用于区分同一机器上不同并发 Claude 终端。
 3. **协同租约流转**：
-   认领任务时分配单调递增的 `fencing_token`。任务执行中通过 Hook 事件或任务命令自动续订租约 TTL。
+   认领任务时把工具名与会话号记进任务登记簿的 `owner`；任务执行中通过 Hook 事件（`Stop`）或任务命令续心跳。空闲过久的任务可被其他会话 `--takeover` 接手，之后原会话的写入会被拒绝（`aisk task` 不使用 fencing token）。
 
 ---
 
@@ -38,9 +38,9 @@ Claude Code 拥有完整的原生生命周期钩子机制，由 `aisk task bind`
 
 ---
 
-## 三、人工确认与系统原生弹窗规范（macOS AppleScript / Windows WinForms）
+## 三、人工确认与系统原生弹窗规范（macOS AppleScript / Windows TaskDialog）
 
-在 Claude 中，凡涉及**合并主干（dev/master/main）、推送远端、落地代码（land/promote）、执行 DDL/SQL 迁移或生产发布等关键/高危操作**，必须通过当前操作系统的原生弹窗向用户请求确认：macOS 使用 `/usr/bin/osascript`，Windows 使用当前交互桌面的 PowerShell WinForms；严禁静默执行或仅在聊天会话中假定已授权。
+在 Claude 中，凡涉及**合并主干（dev/master/main）、推送远端、落地代码（land/promote）、执行 DDL/SQL 迁移或生产发布等关键/高危操作**，必须通过当前操作系统的原生弹窗向用户请求确认：macOS 使用 `/usr/bin/osascript`，Windows 使用当前交互桌面的原生 TaskDialog（ctypes 调用 comctl32）；严禁静默执行或仅在聊天会话中假定已授权。
 
 ### 1. 标题协议与调用范式
 - **标题标准**：`动作-claude｜<任务号>`（如 `git合并-claude｜T042`、`落地代码-claude｜T001`）

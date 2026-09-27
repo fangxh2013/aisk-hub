@@ -22,7 +22,7 @@
 │                    Core 内核层 (通用工程闭环)                │
 │   · 9 大规范领域技能 (短入口 + References 按需加载)           │
 │   · 逻辑别名路由器 (SkillRouter) 平滑映射 26 旧技能          │
-│   · SQLite WAL + CAS + Outbox 任务状态机 (Fencing Token)    │
+│   · JSON 任务登记簿 + 认领租约 + 跨进程文件锁               │
 │   · 离线安全四态契约 (Fail-Fast 快速探针 + 敏感脱敏)        │
 │   · Token 效率行级审计与质量门禁                             │
 └──────────────────────────────┬──────────────────────────────┘
@@ -38,16 +38,27 @@
 ### 1. Core (公共通用内核)
 内核负责标准任务状态机、工作区隔离、领域技能定义、路由分发、高危操作审计与门禁校验。公共内核不硬编码任何具体企业/项目的专有业务规则、内部系统地址、凭据或私有知识。
 
+唯一的例外是**无弹窗写入的授权白名单**，刻意写死在内核里、而不放进档案：档案不能给自己授予
+免确认的自动落地或推送。当前白名单只有两条——`xinhua` 档案的 `be`/`web` 仓库可自动
+`fxh → fxh-dev`，`aisk-hub`/`aisk-private` 档案的 `main` 仓库可在 direct 模式下推送 `master`
+（见 `engine/worktree/config.py` 与 `direct_tasks.py`）。白名单只含档案名、仓库别名与分支名，
+不含拓扑、地址或凭据；扩展它必须改内核代码并经过评审。
+
+任务状态的事实源是每个档案数据根下的 JSON 登记簿（原子写入 + 跨进程文件锁）；
+`spec/state-machine.yaml` 的 SQLite/CAS/fencing 状态机是协同契约的参考实现
+（`engine/coordination_store.py`），由离线验收器验证，尚未接入 `aisk task` 运行时，详见
+[`docs/COORDINATION.md`](COORDINATION.md)「本地状态存储边界」。
+
 ### 2. Adapter (多客户端适配器)
 针对不同 AI 工具的运行差异（Codex、Claude、Antigravity、WorkBuddy、WorkBuddy AI）提供专门适配：
 - 负责环境变量识别与会话唯一标识提取；
 - 负责挂载各端特定的生命周期钩子；
-- 负责统一调用 macOS `/usr/bin/osascript` 或 Windows PowerShell WinForms 弹窗，并遵循 `动作-工具｜任务号` 标题协议；
+- 负责统一调用 macOS `/usr/bin/osascript` 或 Windows 原生 TaskDialog（ctypes 调用 comctl32）弹窗，并遵循 `动作-工具｜任务号` 标题协议；
 - 负责各端特有的技能与 MCP 配置文件分发。
 
 ### 3. Runtime & Overlay (私有运行时与插槽覆盖)
 - **私有仓 (`aisk-private`)**：不复制公共技能，通过 `OVERLAY_MANIFEST.yaml` (v2) 声明式注入业务私有插槽（如微服务包名前缀、菜单图标前缀、环境拓扑）；
-- **任务运行时**：状态机与工作区落盘于 `~/.aisk-runtime/hub/tasks`，与代码仓物理隔离。
+- **任务运行时**：登记簿、锁、日志与任务工作区落在档案声明的 `worktrees.data_root`（业务项目通常是 `~/.aisk-runtime/projects/<项目>/<平台>`），与代码仓物理隔离。
 
 ---
 
@@ -58,7 +69,7 @@
 ### 1. 离线契约分 (Offline Contract Score)
 通过自动化程序（`tools/verify_spec.py`）严格验证静态契约：
 - **Schema 校验**：所有事件、Overlay、MCP 响应 JSON Schema 语法与约束闭环；
-- **协同状态沙箱**：SQLite WAL、CAS 冲突检测、Stale Fencing Token 拦截、事务 Outbox 双写；
+- **协同状态沙箱**：契约参考实现（`coordination_store.py`）的 SQLite WAL、CAS 冲突检测、Stale Fencing Token 拦截、事务 Outbox 双写；
 - **离线 MCP 安全**：不可达时返回 `offline_unavailable`，强行拦截伪造 SQL 响应；
 - **全历史隐私扫描**：通过 `git rev-list --all` 穿透扫描全量 Git 历史；
 - **Token 预算审计**：静态检查常驻技能体量、上下文预算与重复行比例。
@@ -83,7 +94,7 @@
 1. **盘点边界**：全面审计 26 个技能中的通用工程能力与专有业务特征；
 2. **抽取通用**：提炼纯净的领域工程规范，放入公共内核；
 3. **隔离专有**：将企业专有规则迁移至私有仓 `rules/` 与 `profiles/`；
-4. **建立短入口**：创建 9 大规范技能的 `SKILL.md`（6 要素短入口）与 `references/`；
+4. **建立短入口**：创建 9 大规范技能的 `SKILL.md`（「工作方式」「按需参考」两节短入口，见 `docs/SKILL-SPECIFICATION.md`）与 `references/`；
 5. **别名路由器**：在内核中完善 26 旧名称到 9 规范技能的逻辑别名映射（零 symlink）；
 6. **接入 CLI**：将 `SkillRouter` 接入 `aisk link` 与 `aisk skill` 真实分发命令；
 7. **升级 Overlay v2**：私有仓升级为声明式受控插槽，并生成防篡改 Lock 锁文件；

@@ -1,7 +1,7 @@
 {
   "report_id": "token_runtime_baseline",
   "report_type": "TokenRuntimeBenchmark",
-  "benchmark_version": "1.0.0",
+  "benchmark_version": "1.1.0",
   "validation_scope": "offline_contract",
   "offline_contract_score": 100.0,
   "offline_contract_certified": true,
@@ -25,15 +25,21 @@
     "antigravity": "agent-skills/adapters/antigravity/token-policy.yaml",
     "workbuddy": "agent-skills/adapters/workbuddy/token-policy.yaml"
   },
-  "golden_tasks": {"fixture": "agent-skills/tests/test_token_runtime/golden_tasks.json", "cases": 6},
+  "golden_tasks": {"fixture": "agent-skills/tests/token_runtime_golden_tasks.json", "cases": 6},
   "digests": {
-    "fixture": "a55656f948be2a02459a4cf915fc5bb65b38f8bf5902fb60bd1c1e9101dd3623",
-    "policy": "5a28ca68a2b46b67e1061f98a970761a41772d272dfacb861f1533d6ef49db67"
+    "fixture": "b5d1ed59476507d301ef104416d2e88b5bb385830d1ed9a699cc086ddef654f7",
+    "policy": "cc70e1ae97595f77913b5065b0f39a5ba3fc8abc3c9808e970c05bc31ad5d46e"
   },
-  "command": "PYTHONPATH=. python3 -m unittest discover -s tests -p 'test_*.py' (cwd=agent-skills)",
+  "digest_method": {
+    "fixture": "sha256(agent-skills/tests/token_runtime_golden_tasks.json)",
+    "policy": "sha256(cat spec/token-efficiency.yaml + tool_policies 中的四个文件，按 codex、claude、antigravity、workbuddy 顺序首尾相接)"
+  },
+  "command": "PYTHONPATH=agent-skills python3 -m unittest agent-skills/tests/test_token_runtime_golden.py (cwd=仓库根目录)",
   "notes": [
     "Offline score covers deterministic contract tests only; it is not a tokenizer or model accuracy measurement.",
     "No client, external system, credential store, or network was contacted.",
-    "real_runtime_score remains null until each client is actually exercised and evidenced."
+    "real_runtime_score remains null until each client is actually exercised and evidenced.",
+    "1.1.0 is the first baseline reproducible from the public repository: the 1.0.0 fixture was never committed, so its digests could not be recomputed.",
+    "test_token_runtime_golden.py recomputes both digests; editing the fixture or any listed policy file requires regenerating this report."
   ]
 }

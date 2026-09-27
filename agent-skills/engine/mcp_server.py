@@ -3,7 +3,7 @@
 
 纯 Python 标准库实现，零第三方依赖。通过 stdio 承载 JSON-RPC 2.0 协议，
 向 Antigravity 等 AI 客户端直接暴露结构化工具：
-  - aisk_task_inspect: 只读查看多 AI 协同任务状态（SQLite WAL）、租约与事件
+  - aisk_task_inspect: 只读查看 aisk task 任务登记簿（状态、执行者、租约、下一步）
   - aisk_fact_service: 服务事实（镜像/CI Job/DataId/端口/命名空间，支持 brief 精简）
   - aisk_fact_entry: 服务入口与端口（向后兼容保留，底层对齐 fact_service）
   - aisk_env_summary: 环境拓扑与配置概览
@@ -16,6 +16,7 @@ import os
 import socket
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 # 确保 engine 模块可导入
@@ -33,13 +34,13 @@ SERVER_VERSION = "1.1.0"
 TOOLS = [
     {
         "name": "aisk_task_inspect",
-        "description": "只读查看多AI协同任务状态机、租约与挂起事件。",
+        "description": "只读查看 aisk task 任务登记簿：状态、执行者、租约与下一步。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_id": {
                     "type": "string",
-                    "description": "任务ID（如 T001），空则返回任务列表",
+                    "description": "任务编号或全名（如 T001），空则按最近更新列出任务",
                 },
                 "limit": {
                     "type": "integer",
@@ -47,6 +48,10 @@ TOOLS = [
                     "minimum": 1,
                     "maximum": 50,
                     "default": 10,
+                },
+                "profile": {
+                    "type": "string",
+                    "description": "MCP 项目名",
                 },
             },
         },
@@ -244,23 +249,82 @@ def _resolve_prof(explicit=None, db_hint=None):
         raise ToolError(f"未指定 profile 且无法自动推导项目{cand_str}，请在参数中指定 profile。")
 
 
+def _short(value, width=9):
+    return str(value)[:width] if value else "-"
+
+
+def _owner_text(owner):
+    if not owner:
+        return "(无人)"
+    sessions = list(owner.get("sessions") or [])
+    if owner.get("session") and owner["session"] not in sessions:
+        sessions.append(owner["session"])
+    return f"{owner.get('tool') or '?'}:{sessions[0][:8]}…" if sessions else str(owner.get("tool") or "?")
+
+
 def handle_task_inspect(args):
-    """只读查询当前任务状态机（SQLite WAL）、租约与 pending 协同事件。"""
+    """只读查看 aisk task 的任务登记簿：状态、执行者、租约与下一步。
+
+    **登记簿才是任务状态的事实源**（`<data_root>/state/tasks/*.json`，由 `aisk task` 加文件锁维护）。
+    这里曾经默认去读 `~/.aisk-runtime/hub/tasks/state.db`——那是契约参考实现 CoordinationStore
+    的文件名，`aisk task` 从来不写它，于是这个工具在真实环境里只会报「未找到」。
+    显式设置 AISK_STATE_DB 时仍读那份 SQLite（契约存储的调试用途）。
+    """
     task_id = args.get("task_id")
     limit = int(args.get("limit", 10))
-
     state_db_path = os.environ.get("AISK_STATE_DB")
-    if not state_db_path:
-        candidates = [
-            Path.home() / ".aisk-runtime" / "hub" / "tasks" / "state.db",
-            Path.home() / ".aisk" / "state.db",
-        ]
-        for cand in candidates:
-            if cand.is_file():
-                state_db_path = cand
-                break
-    if not state_db_path or not Path(state_db_path).is_file():
-        raise ToolError("未找到本地多 AI 任务状态机数据库 (state.db)。当前无活跃协作工作区。")
+    if state_db_path:
+        return _inspect_state_db(Path(state_db_path), task_id, limit)
+
+    # 延迟导入：任务引擎模块较多，其余工具用不到。
+    from engine.worktree import model as wt_model, tasks as wt_tasks
+    from engine.worktree.config import WtError, build_config
+    from engine.worktree.registry import Registry, parse_iso
+
+    prof = _resolve_prof(args.get("profile"))
+    try:
+        cfg = build_config(prof)
+        reg = Registry(cfg)
+        now_ts = time.time()
+        if task_id:
+            task = reg.find_by_ref(task_id)
+            lease, activity = wt_tasks.lease_of(cfg, task, now_ts, quick=True)
+            lines = [
+                f"task_id: {task['id']}",
+                f"title: {task.get('title', '')}",
+                f"state: {task.get('state')}",
+                f"os: {task.get('os')}",
+                f"owner: {_owner_text(task.get('owner'))}",
+                f"lease: {lease}（{wt_model.LEASE_LABEL[lease]}，{wt_model.age_text(activity, now_ts)}活动）",
+                f"next_step: {wt_tasks.last_next(task) or '-'}",
+            ]
+            for alias, repo in (task.get("repos") or {}).items():
+                lines.append(f"repo.{alias}: branch={repo.get('branch')} "
+                             f"ready={_short(repo.get('ready_sha'))} landed={_short(repo.get('landed_sha'))}")
+            return "\n".join(lines)
+        rows = reg.all()
+        if not rows:
+            return f"档案 {cfg.profile_name} 的任务登记簿里暂无进行中的任务。"
+
+        def updated(task):
+            stamp = parse_iso(task.get("updated_at"))
+            return stamp.timestamp() if stamp else 0.0
+
+        out = []
+        for task in sorted(rows, key=updated, reverse=True)[:limit]:
+            lease, _activity = wt_tasks.lease_of(cfg, task, now_ts, quick=True)
+            out.append(f"[{task['id']}] {task.get('title', '')} | {task.get('state')} | "
+                       f"{_owner_text(task.get('owner'))} | {wt_model.LEASE_LABEL[lease]} | "
+                       f"下一步：{wt_tasks.last_next(task) or '-'}")
+        return "\n".join(out)
+    except WtError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def _inspect_state_db(state_db_path, task_id, limit):
+    """AISK_STATE_DB 指定的契约存储（CoordinationStore 的 SQLite 文件）。"""
+    if not state_db_path.is_file():
+        raise ToolError(f"AISK_STATE_DB 指向的状态库不存在：{state_db_path}")
 
     db = sqlite3.connect(str(state_db_path), timeout=3)
     db.row_factory = sqlite3.Row
@@ -554,8 +618,9 @@ def process_request(req):
                     availability="live", redacted=True,
                     profile=args.get("profile"), environment=args.get("env") or "dev")
             elif tool_name == "aisk_task_inspect":
+                source = "sqlite-coordination-store" if os.environ.get("AISK_STATE_DB") else "aisk-task-registry"
                 result_text = mcp_contract.text_response(
-                    ok=True, source="sqlite-coordination-store", data=raw_text,
+                    ok=True, source=source, data=raw_text,
                     availability="live", redacted=False,
                     profile=args.get("profile"), environment=args.get("env") or "dev")
             else:

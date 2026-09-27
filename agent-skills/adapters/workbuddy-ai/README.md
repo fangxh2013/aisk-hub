@@ -78,7 +78,7 @@ AI 端可拿到内核的 6 个 MCP 工具（`engine/mcp_server.py`），与 Anti
 
 | 工具名 | 功能 | 返回语义 |
 |---|---|---|
-| `aisk_task_inspect` | 只读查协同状态机（SQLite WAL）、租约、fencing_token、挂起事件 | `live` |
+| `aisk_task_inspect` | 只读查 `aisk task` 任务登记簿：状态、执行者、租约、下一步 | `live` |
 | `aisk_fact_service` | 微服务运维事实（镜像 / Deployment / Job / DataId / NodePort），支持 `brief` | `offline_snapshot` |
 | `aisk_fact_entry` | 对外入口与映射端口 | `offline_snapshot` |
 | `aisk_env_summary` | 环境拓扑、主机 IP、命名空间、服务全景 | `offline_snapshot` |
@@ -125,9 +125,9 @@ codebuddy mcp add aisk --scope user \
 - **别名归一**：`workbuddy_ai` / `workbuddyai` / `WORKBUDDY-AI` 都会归一成 `workbuddy-ai`。
 - **fail-closed**：工具身份识别不出来时**不生成弹窗**，直接返回拒绝
   （`registry.py` 的 `except ActionContextError: return False`）。
-- **Windows 原生弹窗**：`IS_WIN` 时使用当前交互桌面的 PowerShell WinForms；标题仍包含
-  `动作-工具`，例如 `git推送-workbuddy-ai | T009 | backend`。确认、取消、超时和启动失败
-  均写入脱敏审计并 fail-closed；没有交互桌面时才回落 TTY，非 TTY 记为拒绝。
+- **Windows 原生弹窗**：`IS_WIN` 时用 ctypes 调用 comctl32 的 TaskDialog（取代旧版 PowerShell
+  WinForms）；标题仍包含 `动作-工具`，例如 `git推送-workbuddy-ai | T009 | backend`。确认、取消、
+  关闭和启动失败均写入脱敏审计并 fail-closed；没有交互桌面时直接拒绝，不回落终端输入。
 - **`aisk permit` 覆盖两端并真实写入（2026-09-19 重写，此前是 `unsupported`）**：
   `engine/permissions.py` 的 `HANDLERS` 含 `workbuddy` 与 `workbuddy-ai`，两端都落到
   `apply_workbuddy()`，写入 **user 作用域** `~/.codebuddy/settings.json` 的

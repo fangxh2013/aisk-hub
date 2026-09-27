@@ -276,8 +276,9 @@ def validate_adapter_contract(data):
     protocol = data.get("dialog_protocol", {})
     if protocol.get("title_format") != "{action}-{tool}｜{task_id}":
         raise contracts.ContractError("公共弹窗标题必须为动作-工具｜任务号")
-    if protocol.get("platform_backends") != {"macos": "osascript", "windows": "powershell_winforms"}:
-        raise contracts.ContractError("公共弹窗必须声明 macOS osascript 与 Windows PowerShell WinForms 后端")
+    if protocol.get("platform_backends") != {"macos": "osascript", "windows": "taskdialog_comctl32"}:
+        # 与 engine/worktree/registry.py 的 confirm_human 对齐：Windows 用 ctypes 调 comctl32 的 TaskDialog。
+        raise contracts.ContractError("公共弹窗必须声明 macOS osascript 与 Windows TaskDialog（comctl32）后端")
     return f"{len(actors)} 个 actor；四工具安装目标、会话、标题和降级策略通过"
 
 
@@ -467,10 +468,17 @@ def mcp_checks(root):
 
 def privacy_checks(root):
     def scan():
-        ok, findings = privacy.verify(root)
-        if not ok:
-            raise AssertionError(findings[:10])
-        return "公开 allowlist 与当前可达 Git 历史扫描通过"
+        report = privacy.verify_report(root)
+        if not report["ok"]:
+            raise AssertionError(report["findings"][:10])
+        detail = "公开 allowlist 与当前可达 Git 历史扫描通过"
+        accepted, stale = report["accepted_history"], report["stale_history_baseline"]
+        if accepted:
+            # 放行不等于隐藏：已登记的历史债务条数写进证据，任何人都能看到它仍在已发布历史里。
+            detail += f"；已登记历史债务 {len(accepted)} 条按 {privacy.BASELINE_RELATIVE} 放行（仅全历史扫描）"
+        if stale:
+            detail += f"；基线中 {len(stale)} 条已不再命中，可删除"
+        return detail
     return [run_check("public_privacy_verify", scan)]
 
 
@@ -544,8 +552,13 @@ def runtime_probe_env(args):
     return env
 
 
-def run_runtime_probes(root, env=None):
-    """真实客户端/外部系统运行时探针。"""
+def run_local_smoke_probes(root, env=None):
+    """本机冒烟探针：用真实启动器读本机档案、登记簿与部署仓，确认内核在这台机器上能跑。
+
+    **它们不是真实客户端联调**：没有任何 AI 客户端加载技能，也没有弹出系统对话框
+    （dry-run、别名路由与标题字符串比对，README 明确写着不能冒充实机通过）。所以通过
+    只记为 local_smoke，永远不产生 real_runtime_score；失败仍让本次验收失败关闭。
+    """
     probes = []
 
     def probe_link():
@@ -556,20 +569,22 @@ def run_runtime_probes(root, env=None):
         for tool in ("claude", "codex", "antigravity", "workbuddy", "workbuddy-ai"):
             if f"[dry-run] {tool}:" not in res.stdout:
                 raise RuntimeError(f"缺少适配端分发输出: {tool}")
-        return "四工具+五适配端分发 dry-run 验证通过，9 个 canonical 技能正确路由"
-    probes.append(run_check("runtime_client_dispatch_probe", probe_link, command="aisk link --dry-run"))
+        return "默认五端分发 dry-run 输出完整（未写入任何端，未验证客户端加载）"
+    probes.append(run_check("smoke_link_dry_run", probe_link, command="aisk link --dry-run"))
 
     def probe_board():
-        # task 子命令必须显式绑定 aisk-hub profile；--brief 避免看板 Markdown
-        # 刷新时对主工作区异常的兼容性降级吞掉 stdout，同时仍验证 SQLite 登记簿可读。
+        # task 子命令必须显式绑定 aisk-hub profile；--brief 只读登记簿摘要，不扫描仓库。
+        # 不断言某个具体任务号：任务归档后探针就会无故变红（曾经写死过 T003）。
         res = subprocess.run([str(root / "bin" / "aisk"), "--profile", "aisk-hub", "task", "status", "--brief"],
                              cwd=root, env=env, capture_output=True, text=True)
         if res.returncode != 0:
             raise RuntimeError(f"aisk task status 失败: {res.stderr}")
-        if "T003" not in res.stdout:
-            raise RuntimeError("任务登记簿输出未包含当前 T003")
-        return "SQLite CAS 协同任务状态与任务摘要查询正常（显式绑定 aisk-hub profile）"
-    probes.append(run_check("runtime_task_board_probe", probe_board, command="aisk --profile aisk-hub task status --brief"))
+        rows = [line for line in res.stdout.splitlines() if line.strip()]
+        malformed = [line for line in rows if line.count(" | ") < 5]
+        if malformed:
+            raise RuntimeError(f"任务摘要格式异常: {malformed[:3]}")
+        return f"任务登记簿可读（aisk-hub 档案，{len(rows)} 条摘要）"
+    probes.append(run_check("smoke_task_registry", probe_board, command="aisk --profile aisk-hub task status --brief"))
 
     def probe_fact():
         res = subprocess.run([str(root / "bin" / "aisk"), "--profile", "xinhua", "fact", "--env", "dev", "service", "goods"],
@@ -577,9 +592,9 @@ def run_runtime_probes(root, env=None):
         if res.returncode != 0:
             raise RuntimeError(f"aisk fact 失败: {res.stderr}")
         if "service=goods" not in res.stdout or "nacos_dataid=" not in res.stdout:
-            raise RuntimeError("未能正确提取 K8s/Nacos 部署事实")
-        return "真实环境 K8s Manifest 与配置中心事实解析通过"
-    probes.append(run_check("runtime_fact_discovery_probe", probe_fact, command="aisk --profile xinhua fact --env dev service goods"))
+            raise RuntimeError("未能正确提取部署清单事实")
+        return "本机部署仓清单的服务事实解析通过（只读本地文件，未连接集群或配置中心）"
+    probes.append(run_check("smoke_fact_discovery", probe_fact, command="aisk --profile xinhua fact --env dev service goods"))
 
     def probe_aliases():
         for legacy, target in (("dev-code", "backend-engineering"),
@@ -589,11 +604,10 @@ def run_runtime_probes(root, env=None):
             resolved = contracts.resolve_skill_alias(root, legacy)
             if resolved != target:
                 raise RuntimeError(f"别名解析异常: {legacy} -> {resolved} != {target}")
-        return "旧技能逻辑别名动态路由到 canonical 领域技能通过"
-    probes.append(run_check("runtime_alias_resolution_probe", probe_aliases, command="aisk skill resolve <alias>"))
+        return "旧技能逻辑别名路由到 canonical 领域技能"
+    probes.append(run_check("smoke_alias_resolution", probe_aliases, command="aisk skill resolve <alias>"))
 
     def probe_dialog():
-        from engine.action_context import ActionContext
         from engine.worktree import integrate
         from types import SimpleNamespace
         args = SimpleNamespace(tool="workbuddy", session="s-1")
@@ -602,8 +616,8 @@ def run_runtime_probes(root, env=None):
             raise RuntimeError(f"WorkBuddy 弹窗标题不符合契约: {ctx.title}")
         if integrate._push_expect(args) != "确认推送":
             raise RuntimeError("WorkBuddy 确认动作不符合契约")
-        return "macOS 原生实名弹窗与 fail-closed 拦截协议运行时检验通过"
-    probes.append(run_check("runtime_dialog_protocol_probe", probe_dialog, command="engine.action_context.ActionContext(...)"))
+        return "WorkBuddy 确认框标题与确认动作的字符串契约通过（未弹出真实对话框）"
+    probes.append(run_check("smoke_dialog_title_contract", probe_dialog, command="engine.action_context.ActionContext(...)"))
 
     return probes
 
@@ -616,7 +630,9 @@ def parse_args(argv=None):
     parser.add_argument("--report-dir", help="where evidence reports are written (default: <root>/reports)")
     parser.add_argument("--no-report-files", action="store_true", help="print summary without writing evidence files")
     parser.add_argument("--require-real", action="store_true", help="return non-zero if no real manifest is supplied")
-    parser.add_argument("--probe-runtime", action="store_true", help="run real client and external system probes to evaluate real_runtime_score")
+    parser.add_argument("--probe-runtime", action="store_true",
+                        help="run local smoke probes with the real launcher and local profiles; a failure fails the run, "
+                             "but passing never sets real_runtime_score (no AI client or real dialog is exercised)")
     return parser.parse_args(argv)
 
 
@@ -698,46 +714,51 @@ def main(argv=None):
             "details": "提供了 --overlay-lock 但缺少 --private-manifest，未执行真实文件验收。",
         })
 
+    # 本工具不触达任何 AI 客户端，也不弹真实对话框，所以永远给不出 real_runtime_score。
+    # 真实联调证据只能来自客户端实机记录（README「验证口径」）；这里如实保持 offline-only。
     real_runtime = {
         "status": "offline-only",
         "score": None,
         "certified": False,
-        "details": "未运行真实客户端联调探针；本次仅完成离线契约与文件验证。",
+        "details": "本工具不执行真实客户端联调；real_runtime_score 需要客户端实机证据，本次未提供。",
     }
+    local_smoke = {"status": "not-run", "probes": [],
+                   "details": "未请求本机冒烟探针（--probe-runtime）。"}
     if args.probe_runtime:
-        runtime_probes = run_runtime_probes(root, runtime_probe_env(args))
-        runtime_passed = all(p["passed"] for p in runtime_probes)
-        real_runtime.update({
-            "status": "runtime-certified" if runtime_passed else "runtime-failed",
-            "score": 100.0 if runtime_passed else 0.0,
-            "certified": runtime_passed,
-            "details": "所有真实客户端与外部系统运行时探针均 100% 通过" if runtime_passed else "部分运行时探针失败",
-            "probes": runtime_probes,
-        })
+        smoke_probes = run_local_smoke_probes(root, runtime_probe_env(args))
+        smoke_passed = all(p["passed"] for p in smoke_probes)
+        local_smoke = {
+            "status": "passed" if smoke_passed else "failed",
+            "probes": smoke_probes,
+            "details": ("本机冒烟探针全部通过（真实启动器 + 本机档案）；不构成真实客户端联调证据"
+                        if smoke_passed else "部分本机冒烟探针失败"),
+        }
 
-    # 一旦显式要求真实运行探针，运行时失败就不能再把离线分数冒充最终分数。
-    final_score = min(total, real_runtime["score"]) if args.probe_runtime else total
+    # 分数只来自离线契约。显式要求的冒烟探针失败时让本次验收失败关闭，但通过不加分、
+    # 也不升级成 real_runtime——以前正是在这里把 dry-run 与字符串比对写成了「真实联调通过」。
+    final_score = total
     offline_certified = bool(total >= float(matrix.get("pass_threshold", 99.9)) and all_passed)
     final_certified = bool(offline_certified and (real_file["certified"] if args.require_real else True)
-                           and (real_runtime["certified"] if args.probe_runtime else True))
+                           and (local_smoke["status"] == "passed" if args.probe_runtime else True))
 
     # 结论只能说跑过的那几层。以前这里无条件写「真实运行时均通过」，而同一份 JSON 里
     # runtime_status 还是 offline-only —— 这正是三分数分离要防的事。
     certified_layers = ["offline_contract"] if offline_certified else []
     if real_file["certified"]:
         certified_layers.append("real_file")
-    if real_runtime["certified"]:
-        certified_layers.append("real_runtime")
+    if local_smoke["status"] == "passed":
+        certified_layers.append("local_smoke")
     note = ["离线契约" + ("通过 99.9+ 门禁" if offline_certified else "未通过门禁")]
     note.append({
         "offline-only": "真实文件未校验（未提供 manifest/lock）",
         "file-checked": "真实文件校验通过" if real_file["certified"] else "真实文件校验未通过",
     }.get(real_file["status"], f"真实文件：{real_file['status']}"))
     note.append({
-        "offline-only": "真实运行时未联调，本结论不代表实机通过",
-        "runtime-certified": "真实运行时联调通过",
-        "runtime-failed": "真实运行时联调未通过",
-    }.get(real_runtime["status"], f"真实运行时：{real_runtime['status']}"))
+        "not-run": "未运行本机冒烟探针",
+        "passed": "本机冒烟探针通过",
+        "failed": "本机冒烟探针未通过",
+    }[local_smoke["status"]])
+    note.append("真实运行时未联调，本结论不代表实机通过")
     certification_note = "；".join(note) + "。"
 
     summary = {
@@ -755,6 +776,7 @@ def main(argv=None):
         "runtime_status": real_runtime["status"],
         "real_file_validation": real_file,
         "real_runtime_validation": real_runtime,
+        "local_smoke_validation": local_smoke,
         "all_reports_passed": all_passed,
         "is_99_plus_certified": final_certified,
         "certified_layers": certified_layers,

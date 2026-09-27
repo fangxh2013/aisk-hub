@@ -804,7 +804,7 @@ def _personal_delivery_config(cfg, alias):
     if missing:
         # 说清缺什么、该去哪做：只说「拒绝」时，AI 会翻源码找原因，最后退回裸 git push（2026-09-27 Windows）
         where = ("Windows 默认只开发到 ready，fxh/dev 的落地、合并和推送在 Mac 集成面执行"
-                 if cfg.os == "windows" else "按 WORKTREE.md §7 在本机档案补齐后再执行")
+                 if cfg.os == "windows" else "在本机档案的 worktrees.repos.<仓库>.automatic 里补齐上述字段后再执行")
         raise Reject(f"{alias} 不是 fxh → fxh-dev/dev 前后端交付配置（{'；'.join(missing)}）。"
                      f"{where}；不要改用 git push 绕过")
     return rc

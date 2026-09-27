@@ -1,0 +1,38 @@
+# 公开 Git 历史里已登记的隐私债务：已经从文件树删除、但仍留在已发布历史里的命中。
+#
+# 语义（与 agent-skills/engine/privacy.py 的 load_history_baseline / history_scan 同步）：
+# - 只作用于全历史扫描（不带 --since 的 aisk public verify，CI 的隐私门禁跑的就是它）。
+#   工作树扫描与 `aisk public verify --since` 的发布门禁一律不读本文件，新内容永远照常拦截。
+# - 每条是精确指纹「完整提交号:路径:规则:行号」，提交号锁死了内容，覆盖不到任何别的命中。
+# - 被扫描分支的顶端提交永不放行。泄露只要还留在顶端的文件树里，顶端提交自己就会命中，
+#   而顶端提交号不可能预先写进它自己包含的这份文件——所以这里只能登记已经删掉的历史。
+# - 只放行已经进入 origin/master 的提交。待合入的提交还能改，登记了也照样拦截；本地没有
+#   origin/master 时一条都不放行（先 git fetch origin）。
+# - 放行不等于隐藏：public verify 与验收报告会列出放行条数；不再命中的条目会提示删除。
+# - 彻底清除只能改写公开历史（强推），需要仓库所有者单独批准；改写后这里的条目会变成
+#   失效条目，删掉即可。
+version: 1
+accepted_findings:
+# 2026-09-23 226435f 引入、2026-09-24 fc53d28 从文件树删除：test_publish_driver.py 里的合成
+# 测试 URL（.invalid 域名，不含凭据或真实主机）带了内部组织名与仓库名，随其后 7 个提交发布。
+- "226435fbbb9a49c07b5828165831fc983cee518b:agent-skills/tests/test_publish_driver.py:private_project_marker:23"
+- "226435fbbb9a49c07b5828165831fc983cee518b:agent-skills/tests/test_publish_driver.py:private_project_marker:284"
+- "226435fbbb9a49c07b5828165831fc983cee518b:agent-skills/tests/test_publish_driver.py:private_project_marker:298"
+- "e7f411f9615ca787eb892e2a33ef2a913555afaa:agent-skills/tests/test_publish_driver.py:private_project_marker:23"
+- "e7f411f9615ca787eb892e2a33ef2a913555afaa:agent-skills/tests/test_publish_driver.py:private_project_marker:284"
+- "e7f411f9615ca787eb892e2a33ef2a913555afaa:agent-skills/tests/test_publish_driver.py:private_project_marker:298"
+- "1d30d0ffe3ba29588e2d37917084a6c155130dbb:agent-skills/tests/test_publish_driver.py:private_project_marker:23"
+- "1d30d0ffe3ba29588e2d37917084a6c155130dbb:agent-skills/tests/test_publish_driver.py:private_project_marker:284"
+- "1d30d0ffe3ba29588e2d37917084a6c155130dbb:agent-skills/tests/test_publish_driver.py:private_project_marker:298"
+- "55b896f462e12396a55f86c4f3ed9e01e445759b:agent-skills/tests/test_publish_driver.py:private_project_marker:23"
+- "55b896f462e12396a55f86c4f3ed9e01e445759b:agent-skills/tests/test_publish_driver.py:private_project_marker:284"
+- "55b896f462e12396a55f86c4f3ed9e01e445759b:agent-skills/tests/test_publish_driver.py:private_project_marker:298"
+- "385cdcc42f8837a50f4db7fe0b669be8c94175ed:agent-skills/tests/test_publish_driver.py:private_project_marker:23"
+- "385cdcc42f8837a50f4db7fe0b669be8c94175ed:agent-skills/tests/test_publish_driver.py:private_project_marker:284"
+- "385cdcc42f8837a50f4db7fe0b669be8c94175ed:agent-skills/tests/test_publish_driver.py:private_project_marker:298"
+- "4bb9d0efc8556990cd68b66170de76e229cea864:agent-skills/tests/test_publish_driver.py:private_project_marker:23"
+- "4bb9d0efc8556990cd68b66170de76e229cea864:agent-skills/tests/test_publish_driver.py:private_project_marker:284"
+- "4bb9d0efc8556990cd68b66170de76e229cea864:agent-skills/tests/test_publish_driver.py:private_project_marker:298"
+- "8bad6305716704c0edb63628ccb38f5f31839350:agent-skills/tests/test_publish_driver.py:private_project_marker:23"
+- "8bad6305716704c0edb63628ccb38f5f31839350:agent-skills/tests/test_publish_driver.py:private_project_marker:284"
+- "8bad6305716704c0edb63628ccb38f5f31839350:agent-skills/tests/test_publish_driver.py:private_project_marker:298"

@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "description": "Token Runtime 黄金任务：离线、确定性，只含示例任务描述，不含真实环境值",
+  "cases": [
+    {
+      "id": "G1-git-push-hard-trigger",
+      "task": "git push origin master",
+      "complexity": "simple",
+      "expect": {"mode": "deep", "fail_to_full": false, "rules": ["git_push"]}
+    },
+    {
+      "id": "G2-database-migration",
+      "task": "数据库迁移：给订单表加索引",
+      "complexity": "complex",
+      "expect": {"mode": "deep", "fail_to_full": false, "rules": ["database"]}
+    },
+    {
+      "id": "G3-plain-simple-task",
+      "task": "修正 README 里的错别字",
+      "complexity": "simple",
+      "expect": {"mode": "lite", "fail_to_full": false, "rules": []}
+    },
+    {
+      "id": "G4-uncertain-complexity",
+      "task": "整理一下这个模块",
+      "complexity": "uncertain",
+      "expect": {"mode": "emergency", "fail_to_full": true, "rules": ["complexity_uncertain"]}
+    },
+    {
+      "id": "G5-rule-conflict",
+      "task": "按两份互相矛盾的规范调整目录结构",
+      "complexity": "standard",
+      "conflicts": ["spec-a vs spec-b"],
+      "expect": {"mode": "emergency", "fail_to_full": true, "rules": ["rule_conflict"]}
+    },
+    {
+      "id": "G6-missing-required-source",
+      "task": "根据接口文档补全字段",
+      "complexity": "standard",
+      "required_sources": ["api-contract"],
+      "available_sources": [],
+      "expect": {"mode": "emergency", "fail_to_full": true, "rules": ["missing_required_context"]}
+    }
+  ]
+}

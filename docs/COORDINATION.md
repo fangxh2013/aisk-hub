@@ -33,7 +33,7 @@ aisk task ready Txxx
 ### Windows 中央交换
 
 Windows 任务目录内不能直接 `git push`，也不能依赖无 TTY 的终端输入。`aisk task ready` 会对
-配置的本地/UNC `hub` 做预检，弹出 WinForms 原生确认框，标题格式为
+配置的本地/UNC `hub` 做预检，弹出 Windows 原生 TaskDialog 确认框，标题格式为
 `git推送-<工具> | <任务号> | <仓库>`；确认后只做非强制推送，并用 `ls-remote` 回读提交号。
 拒绝、超时、远端分叉或回读不一致都 fail-closed，且写入 `.partial.json` 供重试，不会
 覆盖同名分支。
@@ -42,12 +42,25 @@ Windows 任务目录内不能直接 `git push`，也不能依赖无 TTY 的终�
 
 ## 本地状态存储边界
 
-同一台机器上的并发任务状态由 SQLite `state.db` 作为唯一事实源：状态变更、CAS 版本和
-`outbox_events` 在同一事务内提交；JSONL 只作为可重试的审计导出。每次接管递增
-`fencing_token`，旧会话即使从休眠中恢复也不能继续写入。
+`aisk task` 的事实源是每个档案数据根下的登记簿 `<data_root>/state/tasks/<任务号>.json`：
+每次写入都是「同目录临时文件 + fsync + 原子替换」，需要互斥的操作用跨进程文件锁串行
+（登记簿锁、单任务锁、每个仓库的落地锁）；`state/events.jsonl` 只追加事件元数据，供审计。
 
-Mac 与 Windows 不共享同一个 SQLite 文件。跨机器只交换带摘要和签名的 handoff 事件包，
-导入端重新执行状态机校验；网络盘挂载 SQLite 被明确禁止。
+认领租约记在任务记录的 `owner` 上：工具名、会话号与心跳时间。工具和会话号都一致才算同一
+执行者；持有中的任务拒绝其他会话写入，空闲（默认 30 分钟无活动）后需 `--takeover --reason`
+接手，超过可接手时限（默认 120 分钟）才能直接认领。活动时间取心跳、任务分支新提交、未提交
+文件修改时间与 `PROGRESS.md` 修改时间中的最大值。这里没有单调递增的 fencing token：被接手的
+旧会话醒来后，它的写命令和钩子守卫会因执行者不匹配被拒绝，但已经在进行中的写入不会被追溯拦截。
+
+Mac 与 Windows 各用本机登记簿，不共享同一份文件。跨机器交接走中央交换 hub：Windows 的
+`ready` 把任务分支非强制推到 hub 裸仓并用 `ls-remote` 回读核对，同时把任务记录写到
+`hub/state/win/`；Mac 集成端读取这些记录、从 hub 取分支后落地。档案开启 `share_activity`
+时，两端还能看到对方进行中任务的只读摘要。数据根不要放在网络盘上（`aisk task doctor` 会告警）。
+
+`spec/state-machine.yaml` 描述的 SQLite 状态机（CAS 版本、fencing token、事务 outbox）是协同
+契约的参考实现 `agent-skills/engine/coordination_store.py`，由 `tools/verify_spec.py` 离线验证，
+尚未接入 `aisk task` 运行时。MCP 工具 `aisk_task_inspect` 读取的是上面的登记簿；只有显式设置
+`AISK_STATE_DB` 时才读取参考实现的 SQLite 文件。
 
 契约回归可离线执行；报告必须区分三种证据：
 

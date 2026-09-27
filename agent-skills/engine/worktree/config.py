@@ -272,7 +272,7 @@ def build_config(prof, os_name=None):
     os_name = os_name or OS_NAME
     wt = prof.get("worktrees")
     if not isinstance(wt, dict):
-        raise WtError(f"档案 {prof.get('project')} 没有 worktrees 一节（见 WORKTREE.md §7）；{task_profile_hint()}")
+        raise WtError(f"档案 {prof.get('project')} 没有 worktrees 一节（写法见 agent-skills/templates/worktree-profile.example.yaml）；{task_profile_hint()}")
     expand = profile_mod._expand
     data_root = expand(_req(wt, "data_root", "worktrees"))
     integration = str(_req(wt, "integration_branch", "worktrees"))

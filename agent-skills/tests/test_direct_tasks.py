@@ -94,6 +94,15 @@ class DirectTaskTests(unittest.TestCase):
         direct_tasks.cmd_new(self.cfg, self.reg, args)
         return self.reg.all()[0]
 
+    def test_direct_new_names_the_task_after_its_slug(self):
+        # validate_slug 曾经不返回值，direct-new 拿它当 slug，任务被命名成 T001-None。
+        task = self.new_task()
+        self.assertEqual(task["slug"], "direct-doc-change")
+        self.assertEqual(task["name"], f"{task['id']}-direct-doc-change")
+        self.assertEqual(Path(task["dir"]).name, task["name"])
+        self.assertTrue(Path(task["dir"]).is_dir())
+        self.assertEqual(self.reg.find_by_ref(task["name"])["id"], task["id"])
+
     def test_direct_finish_commits_exact_scope_and_creates_no_worktree(self):
         task = self.new_task()
         repo = self.cfg.repo("docs").path

@@ -9,6 +9,7 @@ enter the public loading path.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -59,8 +60,38 @@ DEFAULT_ALIASES = {
 }
 
 
+_REFERENCE_LINK = re.compile(r"\]\((references/[^)\s#]+)\)")
+
+
 class SkillRouterError(Exception):
     """Raised when a route or canonical skill cannot be loaded safely."""
+
+
+def _entry_problems(directory: Path, text: str) -> list[str]:
+    """短入口结构（docs/SKILL-SPECIFICATION.md 第二节），text 已确认以 frontmatter 开头。
+
+    description 要写清「勿用」和「触发」，宿主靠它在相邻技能之间做选择；正文两节齐全；
+    按需参考里的链接与 references/ 下的文件一一对应，不留死链也不留没人索引的孤儿文件。
+    """
+    problems = []
+    head, _, body = text[4:].partition("\n---\n")
+    description = next((line[len("description:"):].strip() for line in head.splitlines()
+                        if line.startswith("description:")), "")
+    for marker in ("勿用：", "触发："):
+        if marker not in description:
+            problems.append(f"description 缺少「{marker}」")
+    headings = {line.strip() for line in body.splitlines()}
+    for heading in ("## 工作方式", "## 按需参考"):
+        if heading not in headings:
+            problems.append(f"正文缺少「{heading}」一节")
+    linked = set(_REFERENCE_LINK.findall(body))
+    for rel in sorted(linked):
+        if ".." in Path(rel).parts or not (directory / rel).is_file():
+            problems.append(f"按需参考链接的 {rel} 不存在")
+    present = {f"references/{p.name}" for p in (directory / "references").glob("*.md") if p.is_file()}
+    for rel in sorted(present - linked):
+        problems.append(f"{rel} 没有在「## 按需参考」里列出")
+    return problems
 
 
 class SkillRouter:
@@ -193,6 +224,8 @@ class SkillRouter:
                 errors.append(f"{target}: 缺少 frontmatter")
             elif f"\nname: {target}\n" not in text:
                 errors.append(f"{target}: frontmatter name 不匹配")
+            else:
+                errors.extend(f"{target}: {problem}" for problem in _entry_problems(directory, text))
             if "/" in target or target.startswith("."):
                 errors.append(f"{target}: 名称不是安全 canonical 名称")
         return errors

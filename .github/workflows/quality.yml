@@ -28,3 +28,13 @@ jobs:
           ./bin/aisk public verify
       - name: Unit tests
         run: PYTHONPATH=agent-skills python -m unittest discover -s agent-skills/tests -p 'test_*.py'
+      - name: Task protocol acceptance
+        # 真实子进程跑 aisk task 与四端钩子，全部在临时沙箱里（独立 HOME 与 git 配置）
+        run: bash agent-skills/tests/protocol_worktree.sh
+      - name: Spec acceptance
+        # 离线契约分低于 spec/acceptance-matrix.yaml 的 pass_threshold（99.9）时返回非零
+        run: PYTHONPATH=agent-skills python tools/verify_spec.py --no-report-files
+      - name: Doc drift and kernel hygiene
+        run: |
+          python agent-skills/tools/check_doc_drift.py
+          python agent-skills/tools/check_kernel_hygiene.py

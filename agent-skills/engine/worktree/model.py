@@ -12,10 +12,13 @@ GENERIC_WORDS = {"fix", "feat", "task", "work", "update", "change", "misc", "tem
 
 
 def validate_slug(cfg, slug):
+    """校验通过返回 slug 本身（与 validate_title 一致）；曾经不返回值，调用方拿返回值当 slug
+    就会把任务命名成 T001-None（direct-new 踩过）。"""
     if not SLUG_RE.match(slug or "") or len(slug) > 40:
         raise WtError("英文短语须为 2–5 个小写单词、用连字符连接、≤40 字符，例如 coupon-claim-lock")
     if cfg.ai_re.search(slug):
         raise WtError("英文短语里不要出现 AI 工具名")
+    return slug
 
 
 def slug_from_name(name, ai_re=None):

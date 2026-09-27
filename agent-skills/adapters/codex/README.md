@@ -18,15 +18,15 @@
    - 环境变量 `CODEX_THREAD_ID`（Codex CLI 默认注入的线程/会话 ID）
    - 环境变量 `CODEX_SESSION_ID`
    - CLI 参数 `--session` 显式指定
-   内核将其作为 `owner_session` 记入 SQLite 协同状态机，实现任务独占与心跳续租。
-3. **租约与 Fencing Token 防御**：
-   Codex 认领任务（`aisk task claim`）时，状态机为其签发严格自增的 `fencing_token`。如果会话因长耗时推理或休眠导致租约超时被其他 AI 接管，Codex 唤醒后的写入将被 `StaleFencingTokenException` 阻断。
+   内核把它与工具名一起记进任务登记簿的认领记录（`owner.sessions`），实现任务独占与心跳续租。
+3. **租约与接手**：
+   Codex 认领任务（`aisk task claim`）后，工具名与会话号都一致才算同一执行者。如果会话因长耗时推理或休眠空闲过久被其他 AI 接手，Codex 唤醒后的写命令与钩子守卫会因执行者不匹配被拒绝（`aisk task` 不使用 fencing token，见 `docs/COORDINATION.md`「本地状态存储边界」）。
 
 ---
 
-## 二、人工确认与系统原生弹窗规范（macOS AppleScript / Windows WinForms）
+## 二、人工确认与系统原生弹窗规范（macOS AppleScript / Windows TaskDialog）
 
-在 Codex 中，凡涉及**合并主干（dev/master/main）、推送远端、落地代码（land/promote）、执行 DDL 迁移或生产发布等关键/高危操作**，必须通过当前操作系统的原生弹窗向用户请求确认：macOS 使用 `/usr/bin/osascript`，Windows 使用当前交互桌面的 PowerShell WinForms；严禁静默执行或假定已授权。
+在 Codex 中，凡涉及**合并主干（dev/master/main）、推送远端、落地代码（land/promote）、执行 DDL 迁移或生产发布等关键/高危操作**，必须通过当前操作系统的原生弹窗向用户请求确认：macOS 使用 `/usr/bin/osascript`，Windows 使用当前交互桌面的原生 TaskDialog（ctypes 调用 comctl32）；严禁静默执行或假定已授权。
 
 ### 1. 标题协议与调用范式
 - **标题标准**：`动作-codex｜<任务号>`（如 `git提交-codex｜T042`、`落地代码-codex｜T003`）
