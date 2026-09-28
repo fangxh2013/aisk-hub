@@ -231,6 +231,23 @@ def _managed_meta(root):
         raise ValueError(f"无法读取受管技能清单: {f}") from e
 
 
+# aiskit（v2）写受管清单时的 by 值。见到它就说明该端已由 aiskit 接管。
+AISKIT_OWNER = "aiskit install"
+
+
+def taken_over_by_aiskit(root):
+    """该端技能已由 aiskit 接管：v1 不再往这里分发，也不把 aiskit 装的技能报成「落后」。
+
+    2026-09-28 真机事故前兆：aiskit 装好后，v1 的 doctor 在 WorkBuddy 两端把业务技能报成
+    落后并建议跑 aisk link——照做会在每端退役 23 个技能。改名或 PATH 挡不住完整路径调用，
+    所以在 v1 这里拦。
+    """
+    try:
+        return _managed_meta(root).get("by") == AISKIT_OWNER
+    except ValueError:
+        return False
+
+
 def _managed_list(root):
     return _managed_meta(root).get("skills", [])
 
@@ -387,6 +404,9 @@ def link(tool, kernel_skills, dry_run=False, overlay_from=None):
         raise ValueError(f"未知的端: {tool}。可用: {', '.join(TARGETS)}")
     root = Path(TARGETS[tool]["root"]).expanduser()
     log = []
+    if taken_over_by_aiskit(root):
+        raise ValueError(f"{tool} 的技能已由 aiskit 接管（aiskit install）；v1 的 aisk link 已停用，"
+                         "请改用 aiskit install / aiskit doctor")
 
     source_map = _kernel_sources(kernel_skills)
     want = {target_name(tool, canonical): source
@@ -587,6 +607,9 @@ def drift_report(kernel_skills):
         root = Path(cfg["root"]).expanduser()
         if not root.is_dir():
             out.append((tool, 0, 0, "端上目录不存在（未分发过）"))
+            continue
+        if taken_over_by_aiskit(root):
+            out.append((tool, 0, 0, "已由 aiskit 接管，v1 不再分发（体检用 aiskit doctor）"))
             continue
         existing = {d.name for d in root.iterdir() if d.is_dir()}
         # 端上明确标了「这份是故意保留的在制品」的技能不参与「落后」判定：

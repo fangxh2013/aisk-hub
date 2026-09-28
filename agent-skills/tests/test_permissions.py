@@ -65,5 +65,27 @@ class WriteVerbsNeverInAllow(unittest.TestCase):
         self.assertFalse(any("git merge" in verb for verb in permissions.READONLY_VERBS))
 
 
+class AiskitTakeoverBlocksV1Link(unittest.TestCase):
+    """aiskit 接管的端：v1 的 link 必须拒绝，doctor 不能再把 aiskit 装的技能报成落后。"""
+
+    def test_link_refuses_and_doctor_reports_takeover(self):
+        from engine import link
+        with TemporaryDirectory(prefix="aisk-takeover-") as home:
+            with patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
+                root = Path(link.TARGETS["claude"]["root"]).expanduser()
+                (root / "ops").mkdir(parents=True)
+                (root / "ops" / "SKILL.md").write_text("---\nname: ops\n---\n", encoding="utf-8")
+                (root / link.MANAGED_MARKER).write_text(
+                    json.dumps({"skills": ["ops"], "by": link.AISKIT_OWNER}), encoding="utf-8")
+                kernel = Path(link.__file__).resolve().parent.parent / "skills"
+                with self.assertRaises(ValueError) as ctx:
+                    link.link("claude", kernel)
+                self.assertIn("aiskit", str(ctx.exception))
+                self.assertTrue((root / "ops" / "SKILL.md").is_file())      # 一个字节都没动
+                report = {t: (b, r, n) for t, b, r, n in link.drift_report(kernel)}
+                self.assertEqual(report["claude"][:2], (0, 0))
+                self.assertIn("aiskit 接管", report["claude"][2])
+
+
 if __name__ == "__main__":
     unittest.main()
